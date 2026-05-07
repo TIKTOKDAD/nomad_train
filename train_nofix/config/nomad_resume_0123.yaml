@@ -1,0 +1,234 @@
+# ============================================================
+# NoMaD (Goal Masking Diffusion Policies) 配置文件
+# ============================================================
+# NoMaD是基于扩散策略的导航和探索模型
+# 核心创新：
+# 1. 使用扩散模型生成轨迹（而非直接回归）
+# 2. 目标掩码机制（Goal Masking）支持无目标探索
+# 3. 更长的轨迹预测（8个航点 vs ViNT的5个）
+
+# ========== 项目基本信息 ==========
+project_name: nomade_new_datatset_fix_17  # 项目名称：NoMaD
+run_name: nomad      # 运行名称
+
+# ========== 训练基本设置 ==========
+use_wandb: True     # 使用Weights & Biases进行实验跟踪
+train: True         # 训练模式
+load_run: nomade_new_datatset_fix/nomad_2026_04_25_11_55_09  # 从旧run断点续训
+batch_size: 256     # 批次大小（与ViNT相同）
+epochs: 83          # 续训剩余轮次：已完成到epoch 16，继续到原目标100轮
+gpu_ids: [0,1,2,3]        # 使用的GPU ID
+num_workers: 32     # 数据加载工作进程数
+lr: 1e-4            # 学习率 0.0001（比ViNT的5e-4更小）
+                    # 扩散模型通常需要更小的学习率以稳定训练
+#load_run: nomad
+optimizer: adamw    # AdamW优化器（带权重衰减）
+clipping: False     # 不使用梯度裁剪
+max_norm: 1.        # 梯度裁剪的最大范数（未启用）
+scheduler: "cosine" # 余弦退火学习率调度器
+warmup: True        # 启用学习率预热（扩散模型训练的常见做法）
+warmup_epochs: 2    # 预热轮次
+cyclic_period: 10   # 循环学习率周期（未使用）
+plateau_patience: 3 # 平台调度器的耐心值（未使用）
+plateau_factor: 0.5 # 平台调度器的衰减因子（未使用）
+seed: 0             # 随机种子
+
+# ========== NoMaD模型架构参数 ==========
+model_type: nomad   # 模型类型：NoMaD（扩散策略模型）
+
+# 视觉编码器配置
+vision_encoder: nomad_vint  # 视觉编码器类型
+                            # nomad_vint: 基于ViNT的编码器（使用GroupNorm替代BatchNorm）
+                            # vib: Vision-based Imitation Behavior编码器
+                            # vit: Vision Transformer编码器
+encoding_size: 256          # 编码维度（比ViNT的512小，更轻量）
+obs_encoder: efficientnet-b0  # 观测编码器：EfficientNet-B0
+
+# Transformer注意力机制参数
+attn_unet: False            # 是否在UNet中使用注意力机制
+cond_predict_scale: False   # 是否预测条件缩放因子
+mha_num_attention_heads: 4  # 多头注意力的头数
+mha_num_attention_layers: 4 # 注意力层数
+mha_ff_dim_factor: 4        # 前馈网络维度因子
+
+# UNet下采样维度配置
+down_dims: [64, 128, 256]   # UNet的下采样通道数
+                            # 定义噪声预测网络的架构
+                            # [64, 128, 256] 表示三层下采样
+
+# ========== 扩散模型参数 ==========
+num_diffusion_iters: 10     # 扩散迭代次数（去噪步数）
+                            # 训练时添加噪声的步数
+                            # 推理时从噪声恢复轨迹的步数
+                            # 10是较少的步数，平衡质量和速度
+
+# ========== 目标掩码机制 ==========
+goal_mask_prob: 0.5         # 【核心创新】目标掩码概率
+                            # 训练时有50%的概率掩盖目标图像
+                            # 这使模型学会：
+                            # - 有目标时：目标导向导航
+                            # - 无目标时：自主探索
+                            # 实现单一模型支持导航和探索两种模式
+
+# ========== 动作空间归一化 ==========
+normalize: True     # 归一化动作空间
+
+# ========== 上下文配置 ==========
+context_type: temporal  # 时序上下文
+context_size: 3         # 上下文大小为3（比ViNT的5小）
+                        # 注释中的5是另一个可选值
+                        # 较小的上下文减少计算量
+
+# ========== 损失函数权重 ==========
+alpha: 1e-4             # 距离损失和扩散损失的权衡系数
+                        # 0.0001 - 非常小的值
+                        # 表示主要关注扩散损失（轨迹生成质量）
+                        # 距离预测是辅助任务
+
+# ========== 距离分类边界 ==========
+# 用于定义目标采样和动作预测的距离范围（单位：航点数，非米）
+# 实际物理距离 = 航点数 × waypoint_spacing × metric_waypoint_spacing
+distance:
+  min_dist_cat: 0   # 目标采样的最小距离（航点数），构建距离类别的下界
+  max_dist_cat: 20  # 目标采样的最大距离（航点数），构建距离类别的上界
+action:
+  min_dist_cat: 3   # 动作预测生效的最小距离阈值（航点数）- 距离 > 此值才计算动作损失
+                    # 比ViNT的2更大，过滤掉更多近距离样本
+  max_dist_cat: 20  # 动作预测生效的最大距离阈值（航点数）- 距离 < 此值才计算动作损失
+                    # 比ViNT的10更大，支持更远距离的动作预测
+
+# ========== 动作输出参数 ==========
+len_traj_pred: 8    # 【关键】预测轨迹长度为8个航点
+                    # 比GNM/ViNT的5个更长
+                    # 扩散模型可以生成更长的轨迹序列
+learn_angle: False  # 【关键】不学习航向角
+                    # 仅预测(x, y)位置，不预测yaw
+                    # 简化扩散模型的输出空间
+
+# ========== 数据集特定参数 ==========
+image_size: [96, 96]  # 【关键】图像尺寸为96x96（正方形）
+                      # 比ViNT的[85, 64]更大且为正方形
+                      # 更高分辨率可能提升扩散模型性能
+
+# ========== 数据集配置 ==========
+# 注意：NoMaD使用独立的数据集文件夹（nomad_dataset而非vint_dataset）
+# 可能包含不同的预处理或数据增强
+datasets:
+  # RECON数据集：室内机器人导航数据
+  recon:
+    data_folder: ../datasets/recon
+    train: ../data_splits/recon/train/
+    test: ../data_splits/recon/test/
+    end_slack: 3        # 轨迹末端裁剪帧数
+    goals_per_obs: 1    # 每个观测采样的目标数量
+    negative_mining: True  # 负样本相关配置项（具体采样行为以ViNT_Dataset实现为准）
+#
+#  # GoStanford数据集：斯坦福校园导航数据
+  go_stanford:
+    data_folder: ../datasets/go_stanford
+    train: ../data_splits/go_stanford/train/
+    test: ../data_splits/go_stanford/test/
+    end_slack: 0
+    goals_per_obs: 2    # 增加数据集大小
+    negative_mining: True
+#
+#  # Cory Hall数据集：室内走廊导航数据
+#  cory_hall:
+#    data_folder: /home/<username>/nomad_dataset/cory_hall/
+#    train: /home/<username>/data_splits/cory_hall/train/
+#    test: /home/<username>/data_splits/cory_hall/test/
+#    end_slack: 3
+#    goals_per_obs: 1
+#    negative_mining: True
+#
+#  # TartanDrive数据集：越野地形导航数据
+#  tartan_drive:
+#    data_folder: /home/<username>/nomad_dataset/tartan_drive/
+#    train: /home/<username>/data_splits/tartan_drive/train/
+#    test: /home/<username>/data_splits/tartan_drive/test/
+#    end_slack: 3
+#    goals_per_obs: 1
+#    negative_mining: True
+#
+#  # SACSoN数据集：多样化室内外导航数据
+  huron:
+    data_folder: ../datasets/huron/
+    train: ../data_splits/huron/train/
+    test: ../data_splits/huron/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  
+  # ========== 私有数据集（如有访问权限可取消注释） ==========
+  # Seattle数据集：西雅图城市导航数据
+  # seattle:
+  #   data_folder: /home/<username>/nomad_dataset/seattle/
+  #   train: /home/<username>/data_splits/seattle/train/
+  #   test: /home/<username>/data_splits/seattle/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  
+  # SCAND数据集：大规模校园导航数据
+  # scand:
+  #   data_folder: /home/<username>/nomad_dataset/scand/
+  #   train: /home/<username>/data_splits/scand/train/
+  #   test: /home/<username>/data_splits/scand/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  locobot_new:
+    data_folder: ../datasets/locobot_new
+    train: ../data_splits/locobot_new/train/
+    test: ../data_splits/locobot_new/test/
+    end_slack: 3
+    goals_per_obs: 2    # 增加数据集大小
+    negative_mining: True
+ 
+  # i2nav数据集： 
+  i2nav:
+    data_folder: ../datasets/i2nav
+    train: ../data_splits/i2nav/train/
+    test: ../data_splits/i2nav/test/
+    end_slack: 2
+    goals_per_obs: 2    # 增加数据集大小
+    negative_mining: True
+    
+  # i2nav数据集： 
+  cid_sims:
+    data_folder: ../datasets/cid_sims
+    train: ../data_splits/cid_sims/train/
+    test: ../data_splits/cid_sims/test/
+    end_slack: 2
+    goals_per_obs: 2    # 增加数据集大小
+    negative_mining: True    
+    
+  # i2nav数据集： 
+  openloris:
+    data_folder: ../datasets/openloris
+    train: ../data_splits/openloris/train/
+    test: ../data_splits/openloris/test/
+    end_slack: 2
+    goals_per_obs: 2    # 增加数据集大小
+    negative_mining: True
+       
+  # i2nav数据集： 
+  ground_challenge:
+    data_folder: ../datasets/ground_challenge
+    train: ../data_splits/ground_challenge/train/
+    test: ../data_splits/ground_challenge/test/
+    end_slack: 2
+    goals_per_obs: 2    # 增加数据集大小
+    negative_mining: True 
+    
+   
+
+# ========== 日志记录配置 ==========
+# 设置为0会关闭相应的日志记录
+print_log_freq: 100      # 打印日志频率（每N次迭代）
+image_log_freq: 1000     # 图像日志频率（每N次迭代）
+num_images_log: 8        # 每次记录的图像数量
+pairwise_test_freq: 0    # 成对测试频率（0表示关闭）
+eval_fraction: 0.25      # 评估数据比例（使用25%的数据）
+wandb_log_freq: 10       # wandb记录频率（每N次迭代）
+eval_freq: 1             # 评估频率（每个epoch评估一次）

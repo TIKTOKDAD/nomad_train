@@ -1,0 +1,123 @@
+# ============================================================
+# 视觉导航Transformer (ViNT) 训练默认配置文件
+# ============================================================
+# 本配置文件包含训练GNM、ViNT、NoMaD模型的默认参数
+# 用户配置文件会覆盖这些默认值
+
+# ========== 项目基本信息 ==========
+project_name: vint  # 项目名称，用于wandb实验跟踪和日志组织
+run_name: vint      # 运行名称，会自动添加时间戳后缀
+
+# ========== 训练基本设置 ==========
+use_wandb: True     # 是否使用Weights & Biases进行实验跟踪和可视化
+train: True         # 是否训练模型（False则仅评估）
+batch_size: 400     # 训练批次大小，根据GPU内存调整
+eval_batch_size: 400  # 评估批次大小
+epochs: 30          # 训练总轮次
+gpu_ids: [0]        # 使用的GPU ID列表，支持多GPU训练
+num_workers: 4      # 数据加载的并行工作进程数
+lr: 5e-4            # 学习率（0.0005）
+optimizer: adam     # 优化器类型：adam, adamw, sgd
+seed: 0             # 随机种子，用于结果可复现
+clipping: False     # 是否启用梯度裁剪
+train_subset: 1.    # 使用训练集的比例（1.0表示使用全部数据）
+
+# ========== 模型架构参数 ==========
+model_type: gnm     # 模型类型：gnm（General Navigation Model）、vint（Visual Navigation Transformer）、nomad（扩散策略模型）
+obs_encoding_size: 1024   # 观测图像的编码维度
+goal_encoding_size: 1024  # 目标图像的编码维度
+
+# ========== 动作空间归一化 ==========
+normalize: True     # 是否归一化动作空间（将动作值标准化到[-1, 1]范围）
+
+# ========== 上下文配置 ==========
+# 上下文是指模型输入的历史观测序列
+context_type: temporal  # 上下文类型：temporal（时序上下文）或randomized（随机采样）
+context_size: 5         # 上下文大小，即输入的历史观测帧数
+
+# ========== 损失函数权重 ==========
+alpha: 0.5          # 距离预测损失和动作预测损失之间的权衡系数（0-1之间）
+                    # total_loss = alpha * 1e-2 * distance_loss + (1-alpha) * action_loss
+beta: 0.1           # 任务损失和KL散度之间的权衡系数（用于变分模型）
+
+# ========== 输入输出类型 ==========
+obs_type: image     # 观测类型：image（图像）
+goal_type: image    # 目标类型：image（目标图像）
+scheduler: null     # 学习率调度器：null（不使用）、cosine（余弦退火）、cyclic（循环）、plateau（平台）
+
+# ========== 距离分类边界 ==========
+# 用于定义目标采样和动作预测的距离范围（单位：航点数，非米）
+# 实际物理距离 = 航点数 × waypoint_spacing × metric_waypoint_spacing
+distance:
+  min_dist_cat: 0   # 目标采样的最小距离（航点数），构建距离类别的下界
+  max_dist_cat: 20  # 目标采样的最大距离（航点数），构建距离类别的上界
+action:
+  min_dist_cat: 2   # 动作预测生效的最小距离阈值（航点数）- 距离 > 此值才计算动作损失
+  max_dist_cat: 10  # 动作预测生效的最大距离阈值（航点数）- 距离 < 此值才计算动作损失
+close_far_threshold: 10  # 近/远目标的分界阈值（航点数）
+                         # 用于区分采样的子目标是近目标还是远目标
+
+# ========== 动作输出参数 ==========
+len_traj_pred: 5    # 预测的轨迹长度（航点数量）
+                    # 模型会预测未来5个航点的位置
+learn_angle: True   # 是否学习和预测航向角（yaw angle）
+                    # True：预测(x, y, yaw)，False：仅预测(x, y)
+
+# ========== 数据集特定参数 ==========
+image_size: [85, 64]  # 输入图像尺寸 [宽度, 高度]（像素）
+                      # 图像会被调整到此尺寸后输入模型
+
+# ========== 日志记录配置 ==========
+# 注意：设置为0会关闭相应的日志记录
+print_log_freq: 100      # 打印训练日志的频率（每N次迭代）
+image_log_freq: 1000     # 记录图像到wandb的频率（每N次迭代）
+num_images_log: 8        # 每次记录时保存的图像数量
+pairwise_test_freq: 10   # 成对测试的频率（每N个epoch）
+eval_fraction: 0.25      # 用于评估的数据集比例（0.25表示使用25%的数据）
+wandb_log_freq: 10       # 记录指标到wandb的频率（每N次迭代）
+eval_freq: 1             # 模型评估的频率（每N个epoch进行一次完整评估）
+
+
+# ========== 性能 / 多卡训练默认配置 ==========
+performance_mode: True          # 性能优化总开关，仅用于标识当前配置偏向高吞吐训练
+distributed: True               # WORLD_SIZE>1 且 torchrun 启动时启用 DDP
+require_ddp_for_multigpu: True  # 多卡时强制使用 torchrun/DDP，避免误走低效 DataParallel
+global_batch_size: null         # null 表示沿用 batch_size 作为全局有效 batch
+deterministic: False            # True 更可复现，但会关闭部分更快的 cuDNN kernel
+cudnn_benchmark: True           # 固定输入尺寸时让 cuDNN 自动选择更快算法
+ddp_static_graph: False         # DDP 静态图优化；确认每步参数使用一致后可改 True
+ddp_gradient_as_bucket_view: True  # 减少 DDP 梯度 bucket 额外拷贝
+ddp_broadcast_buffers: True     # 是否广播 buffer；模型含 buffer 时保持默认更稳
+pin_memory: True                # DataLoader 使用页锁定内存，配合 non_blocking H2D 拷贝
+prefetch_factor: 2              # 每个 worker 预取 batch 数，过高会占更多 CPU 内存
+persistent_workers: True        # worker 跨 epoch 复用，减少反复创建进程开销
+num_workers_is_global: True     # num_workers 表示全局预算，DDP 下自动按卡数拆分
+num_workers_per_rank: null      # 显式指定每个 rank 的 worker 数；null 表示自动计算
+test_num_workers: 4             # 评估 DataLoader worker 数
+test_num_workers_is_global: True  # distributed_eval=True 时评估 worker 也按 rank 拆分
+test_persistent_workers: True   # 评估 worker 跨 epoch 复用
+heavy_metric_log_freq: 1000     # UC/GC 扩散采样重指标频率，保留可观测性但降低干扰
+heavy_metric_start_step: 1000   # 训练到该 global step 后才开始记录重指标
+num_action_samples_log: 8       # 可视化采样轨迹数；不参与训练 loss
+log_by_global_step: True        # 日志按 global step 触发，避免每个 epoch 首 batch 重复触发
+log_first_step: False           # 是否在 global step 0 立刻记录重日志
+image_log_start_step: 3000      # 训练到该 global step 后才开始图像/轨迹可视化
+perf_log_freq: 50               # 轻量性能日志频率：data_time/compute_time/samples_per_sec
+distributed_eval: False         # True 时多卡共同评估并聚合指标；默认关闭更稳
+save_latest_every_epoch: True   # 每个 epoch 保存 latest，保证断点恢复能力
+checkpoint_freq: 5              # numbered 模型 checkpoint 保存频率
+ema_checkpoint_freq: 5          # numbered EMA checkpoint 保存频率
+optimizer_checkpoint_freq: 5    # numbered optimizer checkpoint 保存频率
+scheduler_checkpoint_freq: 5    # numbered scheduler checkpoint 保存频率
+build_lmdb_only: False          # True 时只构建 LMDB 缓存，构建完成后直接退出，不进入训练
+require_lmdb_ready_for_ddp: True # DDP 启动前必须确认 LMDB 已完整构建，避免 NCCL 等待超时
+rebuild_incomplete_lmdb: False  # True 时允许删除未完成/未标记的 LMDB 并重建
+lmdb_cache_mode: auto           # auto=缺失时构建；read=只读完整缓存；build=只构建/补齐缓存
+lmdb_lock: False                # 多 worker 只读 LMDB 建议关闭锁，减少读锁竞争
+lmdb_readahead: False           # 随机读取图像时关闭预读，避免无效 IO
+lmdb_meminit: False             # 只读 LMDB 无需初始化内存页，减少打开开销
+lmdb_max_readers: 512           # LMDB 最大并发 reader 数
+amp: False                      # 默认关闭；V100 可验证 FP16 AMP 曲线一致后再开启
+amp_dtype: fp16                 # V100 不支持 bf16，AMP 只建议 fp16
+use_grad_scaler: True           # FP16 AMP 开启时使用 GradScaler 防止梯度下溢
+find_unused_parameters: False   # NoMaD 每步使用所有子模块，False 可减少 DDP 额外检查

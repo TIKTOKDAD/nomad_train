@@ -1,0 +1,296 @@
+﻿# ============================================================
+# NoMaD 训练配置：nomad_retrain.yaml
+# ============================================================
+# 说明：
+# - 本文件是 NoMaD 训练的覆盖配置，会覆盖 config/defaults.yaml 中的同名参数。
+# - 下面按功能分块：项目、训练、模型、数据、日志、DDP、LMDB、AMP。
+# - 本次整理只调整分块和注释，不改变任何实际训练参数值。
+
+
+# ============================================================
+# 01. 项目与实验命名
+# ============================================================
+# 用途：控制日志目录、wandb 项目名、run 名称。
+# 输出目录会在代码中拼成：logs/{project_name}/{run_name}_时间戳
+project_name: nomade_new_datatset_fix_5_6_3  # 实验项目名，用于 logs 和 wandb project
+run_name: nomad                            # 单次运行名前缀，代码会自动追加时间戳
+use_wandb: True                            # True 时启用 Weights & Biases；build_lmdb_only 时代码会自动关闭
+
+
+# ============================================================
+# 02. 训练开关、优化器与学习率调度
+# ============================================================
+# 用途：控制是否训练、训练轮数、基础 batch、优化器、scheduler、随机种子。
+# 注意：多卡实际有效 batch 优先看 global_batch_size；batch_size 主要保留兼容旧逻辑。
+train: True              # True=训练；False=只构建模型/评估路径，通常保持 True
+batch_size: 256          # 兼容字段；若 global_batch_size 不为 null，代码会用 global_batch_size 覆盖它
+epochs: 100              # 训练总 epoch 数
+gpu_ids: [0,1,2,3]      # 期望使用的 GPU ID；多卡训练必须配合 torchrun/DDP
+num_workers: 48          # DataLoader worker 全局预算；num_workers_is_global=True 时会按卡数拆分
+lr: 1e-4                 # 学习率；NoMaD/扩散模型通常比 ViNT 用更小学习率
+optimizer: adamw         # 优化器类型：adam / adamw / sgd
+clipping: False          # 是否启用梯度裁剪
+max_norm: 1.             # 梯度裁剪阈值；仅 clipping=True 时生效
+scheduler: "cosine"      # 学习率调度器；当前使用 cosine annealing
+warmup: True             # 是否启用 warmup scheduler
+warmup_epochs: 2         # warmup epoch 数
+cyclic_period: 10        # cyclic scheduler 的周期；scheduler 不是 cyclic 时不生效
+plateau_patience: 3      # plateau scheduler 的 patience；scheduler 不是 plateau 时不生效
+plateau_factor: 0.5      # plateau scheduler 的衰减系数；scheduler 不是 plateau 时不生效
+seed: 0                  # 随机种子；用于数据采样、初始化等可复现实验设置
+# load_run: nomad        # 如需断点恢复，可取消注释并填 logs 下的已有 run 名称
+
+
+# ============================================================
+# 03. NoMaD 模型结构
+# ============================================================
+# 用途：定义模型类型、视觉编码器、Transformer 编码维度、噪声预测 UNet 结构。
+model_type: nomad              # 模型类型；此配置使用 NoMaD 扩散策略模型
+vision_encoder: nomad_vint     # 视觉编码器；nomad_vint 是基于 ViNT 的 NoMaD 编码器
+encoding_size: 256             # 视觉编码输出维度，也是后续条件向量维度
+obs_encoder: efficientnet-b0   # 图像 backbone；当前使用 EfficientNet-B0
+attn_unet: False               # 是否在 UNet 中启用额外注意力；当前代码路径中保持 False
+cond_predict_scale: False      # diffusion UNet 是否预测条件缩放；保持 False 更接近原 NoMaD 设置
+mha_num_attention_heads: 4     # Transformer 多头注意力 head 数
+mha_num_attention_layers: 4    # Transformer attention 层数
+mha_ff_dim_factor: 4           # Transformer FFN 隐层维度倍率
+down_dims: [64, 128, 256]      # diffusion noise_pred_net 的 UNet 下采样通道配置
+
+
+# ============================================================
+# 04. 扩散模型与目标掩码机制
+# ============================================================
+# 用途：控制扩散去噪步数，以及 NoMaD 的 goal masking 训练机制。
+num_diffusion_iters: 10  # DDPM diffusion timestep 数；越大通常采样更细，但训练/推理更重
+goal_mask_prob: 0.5     # 训练中目标图像被 mask 的概率；0.5 表示一半有目标、一半无目标探索
+
+
+# ============================================================
+# 05. 输入、上下文、动作与损失定义
+# ============================================================
+# 用途：定义模型输入图像尺寸、历史上下文长度、动作预测长度、距离/动作有效范围。
+normalize: True         # 是否归一化动作；NoMaD 训练依赖归一化后的 action delta
+context_type: temporal  # 上下文采样方式；temporal 表示使用连续历史帧
+context_size: 3         # 历史上下文帧数；实际输入帧数为 context_size + 1
+alpha: 1e-4             # 距离辅助损失权重；NoMaD 主任务仍是 diffusion_loss
+image_size: [96, 96]    # 输入图像尺寸 [W, H]；NoMaD 使用 96x96 正方形图像
+len_traj_pred: 8        # 预测未来轨迹航点数量；NoMaD 默认比 ViNT 更长
+learn_angle: False      # False=只预测 x/y；True=额外预测朝向角，当前不启用
+
+# 距离范围：用于目标采样和距离标签构建，单位是“航点数”，不是米。
+distance:
+  min_dist_cat: 0       # 目标采样最小距离类别
+  max_dist_cat: 20      # 目标采样最大距离类别
+
+# 动作范围：用于决定哪些样本参与动作/轨迹损失。
+action:
+  min_dist_cat: 3       # 距离大于该阈值的样本才更适合学习动作
+  max_dist_cat: 20      # 距离小于该阈值的样本才参与动作预测范围
+
+
+# ============================================================
+# 06. 数据集配置
+# ============================================================
+# 用途：声明每个数据集的原始数据目录、train/test split、采样参数。
+# 每个数据集字段说明：
+# - data_folder: 原始轨迹数据目录，内部通常是 trajectory_name/0.jpg 和 traj_data.pkl
+# - train/test: split 文件夹，内部有 traj_names.txt 和 LMDB cache
+# - end_slack: 忽略轨迹末尾若干帧，避免结尾碰撞/停顿污染训练
+# - goals_per_obs: 每个观测点采样多少个目标；越大数据量越大
+# - negative_mining: 是否保留负样本相关配置，具体行为以 ViNT_Dataset 实现为准
+datasets:
+  recon:
+    data_folder: ../datasets/recon
+    train: ../data_splits/recon/train/
+    test: ../data_splits/recon/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+
+  go_stanford:
+    data_folder: ../datasets/go_stanford
+    train: ../data_splits/go_stanford/train/
+    test: ../data_splits/go_stanford/test/
+    end_slack: 0
+    goals_per_obs: 2
+    negative_mining: True
+
+  huron:
+    data_folder: ../datasets/huron/
+    train: ../data_splits/huron/train/
+    test: ../data_splits/huron/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+
+  scand:
+    data_folder: ../datasets/scand/
+    train: ../data_splits/scand/train/
+    test: ../data_splits/scand/test/
+    end_slack: 0
+    goals_per_obs: 1
+    negative_mining: True
+
+  locobot_new:
+    data_folder: ../datasets/locobot_new
+    train: ../data_splits/locobot_new/train/
+    test: ../data_splits/locobot_new/test/
+    end_slack: 3
+    goals_per_obs: 2
+    negative_mining: True
+
+  i2nav:
+    data_folder: ../datasets/i2nav
+    train: ../data_splits/i2nav/train/
+    test: ../data_splits/i2nav/test/
+    end_slack: 2
+    goals_per_obs: 2
+    negative_mining: True
+
+  cid_sims:
+    data_folder: ../datasets/cid_sims
+    train: ../data_splits/cid_sims/train/
+    test: ../data_splits/cid_sims/test/
+    end_slack: 2
+    goals_per_obs: 2
+    negative_mining: True
+
+  openloris:
+    data_folder: ../datasets/openloris
+    train: ../data_splits/openloris/train/
+    test: ../data_splits/openloris/test/
+    end_slack: 2
+    goals_per_obs: 2
+    negative_mining: True
+
+  musohu:
+    data_folder: ../datasets/musohu
+    train: ../data_splits/musohu/train/
+    test: ../data_splits/musohu/test/
+    end_slack: 2
+    goals_per_obs: 1
+    negative_mining: True
+
+  ground_challenge:
+    data_folder: ../datasets/ground_challenge
+    train: ../data_splits/ground_challenge/train/
+    test: ../data_splits/ground_challenge/test/
+    end_slack: 2
+    goals_per_obs: 2
+    negative_mining: True
+
+  botanic:
+    data_folder: ../datasets/botanic
+    train: ../data_splits/botanic/train/
+    test: ../data_splits/botanic/test/
+    end_slack: 2
+    goals_per_obs: 2
+    negative_mining: True
+
+  rellis:
+    data_folder: ../datasets/rellis
+    train: ../data_splits/rellis/train/
+    test: ../data_splits/rellis/test/
+    end_slack: 2
+    goals_per_obs: 2
+    negative_mining: True
+
+
+# ============================================================
+# 07. 普通日志、评估与可视化频率
+# ============================================================
+# 用途：控制控制台日志、wandb 标量日志、图像日志、评估频率。
+# 设置为 0 通常表示关闭对应功能。
+print_log_freq: 100      # 控制台打印频率，单位为 step
+wandb_log_freq: 50       # wandb 标量日志频率，单位为 step
+image_log_freq: 3000     # 图像/轨迹可视化频率，单位为 global step
+num_images_log: 8        # 每次图像日志记录的样本数量
+pairwise_test_freq: 0    # 成对测试频率；0 表示关闭
+eval_fraction: 0.2       # 每次 eval 使用测试集的比例；降低可减少评估时间
+eval_freq: 5             # 每多少个 epoch 评估一次
+
+
+# ============================================================
+# 08. DDP 多卡训练与 batch 语义
+# ============================================================
+# 用途：控制是否使用 DDP，以及全局 batch 如何拆到每张 GPU。
+# 重点：global_batch_size 是全局有效 batch，不是每卡 batch。
+performance_mode: True          # 标识当前配置面向高吞吐训练；代码主要用于可读性/记录
+distributed: True               # torchrun 且 WORLD_SIZE>1 时启用 DDP
+require_ddp_for_multigpu: True  # 多卡必须使用 DDP，避免退回低效 DataParallel
+global_batch_size: 256          # 全局有效 batch；4 卡时每卡 64。若想最接近旧训练动态可改为 224
+eval_batch_size: 256            # rank0 单卡评估 batch；避免评估 batch 过大导致显存尖峰
+deterministic: False            # False 允许更快但非 bitwise deterministic 的 cuDNN kernel
+cudnn_benchmark: True           # 输入尺寸固定时让 cuDNN 自动选择更快卷积算法
+ddp_static_graph: True          # DDP 静态图优化；若遇到 static graph 报错可改回 False
+ddp_gradient_as_bucket_view: True  # 减少 DDP 梯度 bucket 拷贝，通常不改变训练结果
+ddp_broadcast_buffers: True     # 是否广播模型 buffer；保守保持 True，若确认无 BN 可考虑 False
+find_unused_parameters: False   # 若每步都使用所有子模块，False 可减少 DDP 额外遍历
+
+
+# ============================================================
+# 09. DataLoader、CPU worker 与数据传输
+# ============================================================
+# 用途：控制 CPU 读取、预取、pin memory 和多卡 worker 拆分。
+# 如果 CPU 占用过高或训练一卡一卡，可优先降低 num_workers 或 prefetch_factor。
+pin_memory: True                # 使用页锁定内存，加速 CPU -> GPU 异步拷贝
+prefetch_factor: 4              # 每个 worker 预取 batch 数；值越大越吃 CPU/内存/IO
+persistent_workers: True        # 跨 epoch 复用 worker，减少反复创建进程开销
+num_workers_is_global: True     # True 表示 num_workers 是全局预算，DDP 下按 world_size 拆分
+num_workers_per_rank: null      # 显式每卡 worker 数；null 表示自动由 num_workers / world_size 计算
+test_num_workers: 8             # 评估 DataLoader worker 数；distributed_eval=False 时主要 rank0 使用
+test_num_workers_is_global: True  # distributed_eval=True 时评估 worker 也按 rank 拆分
+test_persistent_workers: True   # 评估 worker 也跨 epoch 复用
+
+
+# ============================================================
+# 10. 重指标、性能指标与可观测性
+# ============================================================
+# 用途：保留 UC/GC 扩散行为指标，但降低频率，避免频繁采样干扰训练主干。
+heavy_metric_log_freq: 1000     # UC/GC 扩散采样重指标频率；越小越影响训练速度
+heavy_metric_start_step: 1000   # 从该 global step 后才开始记录重指标
+num_action_samples_log: 8       # 可视化动作采样条数；越大绘图和采样越重
+log_by_global_step: True        # 日志按 global step 触发，避免每个 epoch 第 0 step 重复触发
+log_first_step: False           # 是否在 global step 0 立刻跑日志/可视化；False 可减少启动干扰
+image_log_start_step: 3000      # 从该 global step 后才允许图像可视化
+perf_log_freq: 50               # 性能日志频率：data_time、compute_time、samples_per_sec
+distributed_eval: False         # False=只 rank0 eval；True=多卡分片 eval 并聚合指标
+
+
+# ============================================================
+# 11. checkpoint 与断点恢复
+# ============================================================
+# 用途：控制 latest 和 numbered checkpoint 保存频率。
+# latest 每个 epoch 保存用于断点恢复；numbered 低频保存用于保留历史版本。
+save_latest_every_epoch: True   # 每个 epoch 保存 latest/ema_latest/optimizer_latest/scheduler_latest
+checkpoint_freq: 5              # 每多少个 epoch 保存 numbered 模型 checkpoint
+ema_checkpoint_freq: 5          # 每多少个 epoch 保存 numbered EMA checkpoint
+optimizer_checkpoint_freq: 5    # 每多少个 epoch 保存 numbered optimizer checkpoint
+scheduler_checkpoint_freq: 5    # 每多少个 epoch 保存 numbered scheduler checkpoint
+
+
+# ============================================================
+# 12. LMDB 缓存构建与训练只读参数
+# ============================================================
+# 用途：把“构建 LMDB”和“DDP 训练”拆开，避免 DDP 初始化后长时间构建 cache 导致 NCCL timeout。
+# 推荐流程：
+# 1) 单进程构建：python train.py -c config/nomad_retrain.yaml --build-lmdb-only --rebuild-incomplete-lmdb
+# 2) 多卡训练：torchrun --standalone --nproc_per_node=4 train.py -c config/nomad_retrain.yaml
+build_lmdb_only: False           # True 时只构建 LMDB，构建完成后直接退出，不进入训练
+require_lmdb_ready_for_ddp: True # True 时 DDP 初始化前检查所有 LMDB 是否完整
+rebuild_incomplete_lmdb: False   # True 时允许删除未完成/未标记的 LMDB 后重建
+lmdb_cache_mode: auto            # auto=缺失时构建；read=只读完整缓存；build=只构建/补齐缓存
+lmdb_lock: False                 # 训练只读 LMDB 关闭锁，减少多 worker 读锁竞争
+lmdb_readahead: False            # 随机读取图像关闭 OS 预读，避免无效 IO 和页缓存压力
+lmdb_meminit: False              # 只读 LMDB 无需初始化内存页，减少打开开销
+lmdb_max_readers: 1024            # LMDB 最大 reader 数；当前 worker 规模下 512 通常足够
+
+
+# ============================================================
+# 13. AMP 混合精度
+# ============================================================
+# 用途：控制 V100 上是否使用 FP16 AMP。
+# V100 不支持 bf16；如果要开 AMP，请先短跑对比 loss 曲线再正式训练。
+amp: False             # 默认关闭，最大程度保持 FP32 训练语义
+amp_dtype: fp16        # V100 只建议 fp16，不建议 bf16
+use_grad_scaler: True  # amp=True 时启用 GradScaler，降低 FP16 梯度下溢风险

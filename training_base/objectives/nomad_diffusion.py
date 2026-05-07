@@ -1,0 +1,101 @@
+from typing import Dict
+
+import numpy as np
+import torch
+
+from training_base.data.action_stats import get_delta_torch, load_action_stats, normalize_data_torch
+from training_base.losses import action_reduce, get_configured_loss
+from training_base.registry import objective_registry
+
+
+def sample_goal_mask(batch_size: int, goal_mask_prob: float, device: torch.device) -> torch.Tensor:
+    goal_mask_prob = float(np.clip(float(goal_mask_prob), 0.0, 1.0))
+    return (torch.rand((batch_size,), device=device) < goal_mask_prob).long()
+
+
+@objective_registry.register("nomad_diffusion")
+class NoMaDDiffusionObjective:
+    def __init__(self, config) -> None:
+        self.goal_mask_prob = float(config["goal_mask_prob"])
+        self.alpha = float(config["alpha"])
+        self.action_stats = load_action_stats(config.get("action_stats"))
+        losses = config.get("losses", {})
+        self.distance_loss = get_configured_loss(losses, "distance", "mse")
+        self.diffusion_loss = get_configured_loss(losses, "diffusion", "mse")
+
+    def train_losses(
+        self,
+        *,
+        model,
+        noise_scheduler,
+        batch_obs_images: torch.Tensor,
+        batch_goal_images: torch.Tensor,
+        actions: torch.Tensor,
+        distance: torch.Tensor,
+        action_mask: torch.Tensor,
+        device: torch.device,
+    ) -> Dict[str, torch.Tensor]:
+        batch_size = actions.shape[0]
+        goal_mask = sample_goal_mask(batch_size, self.goal_mask_prob, device)
+        obsgoal_cond = model.encode_vision(batch_obs_images, batch_goal_images, goal_mask)
+
+        deltas = get_delta_torch(actions)
+        naction = normalize_data_torch(deltas, self.action_stats)
+        if naction.shape[-1] != 2:
+            raise ValueError("action dim must be 2")
+
+        dist_pred = model.predict_distance(obsgoal_cond)
+        raw_dist_loss = self.distance_loss(dist_pred.squeeze(-1), distance, reduction="none")
+        visible_goal = 1 - goal_mask.float()
+        dist_loss = (raw_dist_loss * visible_goal).mean() / (1e-2 + visible_goal.mean())
+
+        noise = torch.randn_like(naction)
+        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
+        noisy_action = noise_scheduler.add_noise(naction, noise, timesteps)
+        noise_pred = model.predict_noise(noisy_action, timesteps, obsgoal_cond)
+
+        diffusion_loss = action_reduce(self.diffusion_loss(noise_pred, noise, reduction="none"), action_mask)
+        total_loss = self.alpha * dist_loss + (1 - self.alpha) * diffusion_loss
+        return {
+            "loss": total_loss,
+            "total_loss": total_loss,
+            "dist_loss": dist_loss,
+            "diffusion_loss": diffusion_loss,
+            "noise_pred": noise_pred,
+            "noise": noise,
+            "goal_mask": goal_mask,
+        }
+
+    def eval_losses(
+        self,
+        *,
+        model,
+        noise_scheduler,
+        batch_obs_images: torch.Tensor,
+        batch_goal_images: torch.Tensor,
+        actions: torch.Tensor,
+        device: torch.device,
+    ) -> Dict[str, torch.Tensor]:
+        batch_size = actions.shape[0]
+        rand_goal_mask = sample_goal_mask(batch_size, self.goal_mask_prob, device)
+        goal_mask = torch.ones_like(rand_goal_mask).long()
+        no_mask = torch.zeros_like(rand_goal_mask).long()
+
+        rand_mask_cond = model.encode_vision(batch_obs_images, batch_goal_images, rand_goal_mask)
+        obsgoal_cond = model.encode_vision(batch_obs_images, batch_goal_images, no_mask).flatten(start_dim=1)
+        goal_mask_cond = model.encode_vision(batch_obs_images, batch_goal_images, goal_mask)
+
+        deltas = get_delta_torch(actions)
+        naction = normalize_data_torch(deltas, self.action_stats)
+        noise = torch.randn_like(naction)
+        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
+        noisy_actions = noise_scheduler.add_noise(naction, noise, timesteps)
+
+        rand_mask_noise_pred = model.predict_noise(noisy_actions, timesteps, rand_mask_cond)
+        no_mask_noise_pred = model.predict_noise(noisy_actions, timesteps, obsgoal_cond)
+        goal_mask_noise_pred = model.predict_noise(noisy_actions, timesteps, goal_mask_cond)
+        return {
+            "rand_mask_loss": self.diffusion_loss(rand_mask_noise_pred, noise),
+            "no_mask_loss": self.diffusion_loss(no_mask_noise_pred, noise),
+            "goal_mask_loss": self.diffusion_loss(goal_mask_noise_pred, noise),
+        }

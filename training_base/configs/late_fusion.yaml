@@ -1,0 +1,20 @@
+algorithm:
+  name: vint
+
+runtime:
+  project_name: vint-release
+  run_name: vint-late-fusion
+
+model:
+  name: vint
+  obs_encoder: efficientnet-b0
+  obs_encoding_size: 512
+  late_fusion: true
+  transformer:
+    num_heads: 4
+    num_layers: 4
+    ff_dim_factor: 4
+
+objective:
+  name: supervised_waypoint
+  alpha: 0.5

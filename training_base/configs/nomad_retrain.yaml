@@ -1,0 +1,233 @@
+algorithm:
+  name: nomad
+  ema:
+    enabled: true
+    power: 0.75
+
+runtime:
+  project_name: nomade_new_datatset_fix_5_6_3
+  run_name: nomad
+  train: true
+  batch_size: 256
+  eval_batch_size: 256
+  epochs: 100
+  gpu_ids: [0, 1, 2, 3]
+  num_workers: 48
+  seed: 0
+  distributed: true
+  require_ddp_for_multigpu: true
+  global_batch_size: 256
+  deterministic: false
+  cudnn_benchmark: true
+  ddp_static_graph: true
+  ddp_gradient_as_bucket_view: true
+  ddp_broadcast_buffers: true
+  find_unused_parameters: false
+  pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
+  num_workers_is_global: true
+  num_workers_per_rank: null
+  test_num_workers: 8
+  test_num_workers_is_global: true
+  test_persistent_workers: true
+  distributed_eval: false
+  eval_fraction: 0.2
+  eval_freq: 5
+  build_lmdb_only: false
+  require_lmdb_ready_for_ddp: true
+  rebuild_incomplete_lmdb: false
+  lmdb_cache_mode: auto
+  lmdb_lock: false
+  lmdb_readahead: false
+  lmdb_meminit: false
+  lmdb_max_readers: 1024
+  amp: false
+  amp_dtype: fp16
+  use_grad_scaler: true
+
+data:
+  normalize: true
+  context_type: temporal
+  context_size: 3
+  obs_type: image
+  goal_type: image
+  image_size: [96, 96]
+  len_traj_pred: 8
+  learn_angle: false
+  distance:
+    min_dist_cat: 0
+    max_dist_cat: 20
+  action:
+    min_dist_cat: 3
+    max_dist_cat: 20
+  datasets:
+    recon:
+      data_folder: ../datasets/recon
+      train: ../data_splits/recon/train/
+      test: ../data_splits/recon/test/
+      end_slack: 3
+      goals_per_obs: 1
+      negative_mining: true
+    go_stanford:
+      data_folder: ../datasets/go_stanford
+      train: ../data_splits/go_stanford/train/
+      test: ../data_splits/go_stanford/test/
+      end_slack: 0
+      goals_per_obs: 2
+      negative_mining: true
+    huron:
+      data_folder: ../datasets/huron/
+      train: ../data_splits/huron/train/
+      test: ../data_splits/huron/test/
+      end_slack: 3
+      goals_per_obs: 1
+      negative_mining: true
+    scand:
+      data_folder: ../datasets/scand/
+      train: ../data_splits/scand/train/
+      test: ../data_splits/scand/test/
+      end_slack: 0
+      goals_per_obs: 1
+      negative_mining: true
+    locobot_new:
+      data_folder: ../datasets/locobot_new
+      train: ../data_splits/locobot_new/train/
+      test: ../data_splits/locobot_new/test/
+      end_slack: 3
+      goals_per_obs: 2
+      negative_mining: true
+    i2nav:
+      data_folder: ../datasets/i2nav
+      train: ../data_splits/i2nav/train/
+      test: ../data_splits/i2nav/test/
+      end_slack: 2
+      goals_per_obs: 2
+      negative_mining: true
+    cid_sims:
+      data_folder: ../datasets/cid_sims
+      train: ../data_splits/cid_sims/train/
+      test: ../data_splits/cid_sims/test/
+      end_slack: 2
+      goals_per_obs: 2
+      negative_mining: true
+    openloris:
+      data_folder: ../datasets/openloris
+      train: ../data_splits/openloris/train/
+      test: ../data_splits/openloris/test/
+      end_slack: 2
+      goals_per_obs: 2
+      negative_mining: true
+    musohu:
+      data_folder: ../datasets/musohu
+      train: ../data_splits/musohu/train/
+      test: ../data_splits/musohu/test/
+      end_slack: 2
+      goals_per_obs: 1
+      negative_mining: true
+    ground_challenge:
+      data_folder: ../datasets/ground_challenge
+      train: ../data_splits/ground_challenge/train/
+      test: ../data_splits/ground_challenge/test/
+      end_slack: 2
+      goals_per_obs: 2
+      negative_mining: true
+    botanic:
+      data_folder: ../datasets/botanic
+      train: ../data_splits/botanic/train/
+      test: ../data_splits/botanic/test/
+      end_slack: 2
+      goals_per_obs: 2
+      negative_mining: true
+    rellis:
+      data_folder: ../datasets/rellis
+      train: ../data_splits/rellis/train/
+      test: ../data_splits/rellis/test/
+      end_slack: 2
+      goals_per_obs: 2
+      negative_mining: true
+
+model:
+  name: nomad
+  vision_encoder:
+    name: masked_vint
+    obs_encoder: efficientnet-b0
+    encoding_size: 256
+    transformer:
+      num_heads: 4
+      num_layers: 4
+      ff_dim_factor: 4
+  diffusion:
+    name: conditional_unet1d
+    input_dim: 2
+    down_dims: [64, 128, 256]
+    cond_predict_scale: false
+  diffusion_scheduler:
+    name: ddpm
+    num_train_timesteps: 10
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    prediction_type: epsilon
+  distance_predictor:
+    name: distance_mlp
+    embedding_dim: 256
+
+objective:
+  name: nomad_diffusion
+  goal_mask_prob: 0.5
+  alpha: 1e-4
+  losses:
+    diffusion: mse
+    distance: mse
+
+optimizer:
+  name: adamw
+  lr: 1e-4
+  gradient_clip:
+    enabled: false
+    max_norm: 1.0
+
+scheduler:
+  name: cosine
+  epochs: 100
+  lr: 1e-4
+  warmup:
+    enabled: true
+    epochs: 2
+  cyclic_period: 10
+  plateau_patience: 3
+  plateau_factor: 0.5
+
+metrics:
+  heavy:
+    - name: nomad_behavior
+
+logging:
+  metric_log_freq: 100
+  image_log_freq: 3000
+  heavy_metric_log_freq: 1000
+  heavy_metric_start_step: 1000
+  image_start_step: 3000
+  perf_log_freq: 50
+  by_global_step: true
+  first_step: false
+  window_size: 100
+  sinks:
+    - name: console
+    - name: wandb
+      enabled: true
+      entity: 1948627929-university-of-central-florida
+
+visualization:
+  num_images_log: 8
+  num_action_samples_log: 8
+  train:
+    - name: nomad_action_distribution
+  eval:
+    - name: nomad_action_distribution
+
+callbacks:
+  - name: checkpoint
+    save_latest_every_epoch: true
+    checkpoint_freq: 5
+  - name: perf_monitor

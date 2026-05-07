@@ -1,0 +1,44 @@
+algorithm:
+  name: gnm
+
+runtime:
+  project_name: vint-release
+  run_name: gnm
+  train: true
+  batch_size: 400
+  eval_batch_size: 400
+  epochs: 30
+  gpu_ids: [0]
+  num_workers: 4
+
+data:
+  normalize: true
+  context_type: temporal
+  context_size: 5
+  image_size: [85, 64]
+  goal_type: image
+  len_traj_pred: 5
+  learn_angle: true
+  distance:
+    min_dist_cat: 0
+    max_dist_cat: 20
+  action:
+    min_dist_cat: 2
+    max_dist_cat: 10
+  datasets: {}
+
+model:
+  name: gnm
+  obs_encoding_size: 1024
+  goal_encoding_size: 1024
+
+objective:
+  name: supervised_waypoint
+  alpha: 0.5
+
+optimizer:
+  name: adam
+  lr: 7e-4
+  gradient_clip:
+    enabled: false
+    max_norm: 1.0

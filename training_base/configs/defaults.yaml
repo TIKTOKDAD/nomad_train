@@ -1,0 +1,131 @@
+# Navigation training base defaults.
+
+algorithm:
+  name: gnm
+
+runtime:
+  project_name: navigation
+  run_name: default
+  train: true
+  batch_size: 400
+  eval_batch_size: 400
+  epochs: 30
+  gpu_ids: [0]
+  num_workers: 4
+  seed: 0
+  train_subset: 1.0
+  distributed: true
+  require_ddp_for_multigpu: true
+  global_batch_size: null
+  deterministic: false
+  cudnn_benchmark: true
+  ddp_static_graph: false
+  ddp_gradient_as_bucket_view: true
+  ddp_broadcast_buffers: true
+  find_unused_parameters: false
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+  num_workers_is_global: true
+  num_workers_per_rank: null
+  test_num_workers: 4
+  test_num_workers_is_global: true
+  test_persistent_workers: true
+  distributed_eval: false
+  eval_fraction: 0.25
+  eval_freq: 1
+  build_lmdb_only: false
+  require_lmdb_ready_for_ddp: true
+  rebuild_incomplete_lmdb: false
+  lmdb_cache_mode: auto
+  lmdb_lock: false
+  lmdb_readahead: false
+  lmdb_meminit: false
+  lmdb_max_readers: 512
+  amp: false
+  amp_dtype: fp16
+  use_grad_scaler: true
+
+data:
+  normalize: true
+  context_type: temporal
+  context_size: 5
+  obs_type: image
+  goal_type: image
+  image_size: [85, 64]
+  len_traj_pred: 5
+  learn_angle: true
+  distance:
+    min_dist_cat: 0
+    max_dist_cat: 20
+  action:
+    min_dist_cat: 2
+    max_dist_cat: 10
+  close_far_threshold: 10
+  datasets: {}
+
+model:
+  name: gnm
+  obs_encoding_size: 1024
+  goal_encoding_size: 1024
+  obs_encoder: efficientnet-b0
+  late_fusion: false
+  transformer:
+    num_heads: 4
+    num_layers: 4
+    ff_dim_factor: 4
+
+objective:
+  name: supervised_waypoint
+  alpha: 0.5
+  losses:
+    distance: mse
+    action: mse
+
+optimizer:
+  name: adam
+  lr: 5e-4
+  gradient_clip:
+    enabled: false
+    max_norm: 1.0
+
+scheduler:
+  name: none
+  warmup:
+    enabled: false
+    epochs: 1
+  cyclic_period: 10
+  plateau_patience: 3
+  plateau_factor: 0.5
+
+metrics:
+  train: []
+  eval: []
+  heavy: []
+
+logging:
+  metric_log_freq: 100
+  image_log_freq: 1000
+  heavy_metric_log_freq: 1000
+  heavy_metric_start_step: 1000
+  image_start_step: 3000
+  perf_log_freq: 50
+  by_global_step: true
+  first_step: false
+  window_size: 100
+  sinks:
+    - name: console
+
+visualization:
+  num_images_log: 8
+  num_action_samples_log: 8
+  train:
+    - name: supervised_waypoint
+  eval:
+    - name: supervised_waypoint
+
+callbacks:
+  - name: checkpoint
+    save_latest_every_epoch: true
+    checkpoint_freq: 5
+  - name: perf_monitor

@@ -1,0 +1,57 @@
+algorithm:
+  name: vint
+
+runtime:
+  project_name: vint-release
+  run_name: vint
+  train: true
+  batch_size: 256
+  eval_batch_size: 256
+  epochs: 100
+  gpu_ids: [0]
+  num_workers: 12
+
+data:
+  normalize: true
+  context_type: temporal
+  context_size: 5
+  image_size: [85, 64]
+  goal_type: image
+  len_traj_pred: 5
+  learn_angle: true
+  distance:
+    min_dist_cat: 0
+    max_dist_cat: 20
+  action:
+    min_dist_cat: 0
+    max_dist_cat: 10
+  datasets: {}
+
+model:
+  name: vint
+  obs_encoder: efficientnet-b0
+  obs_encoding_size: 512
+  late_fusion: false
+  transformer:
+    num_heads: 4
+    num_layers: 4
+    ff_dim_factor: 4
+
+objective:
+  name: supervised_waypoint
+  alpha: 0.5
+
+optimizer:
+  name: adamw
+  lr: 5e-4
+  gradient_clip:
+    enabled: false
+    max_norm: 1.0
+
+scheduler:
+  name: cosine
+  epochs: 100
+  lr: 5e-4
+  warmup:
+    enabled: true
+    epochs: 4
