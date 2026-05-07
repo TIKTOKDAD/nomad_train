@@ -10,6 +10,7 @@ from training_base.core.checkpoint import (
     find_latest_checkpoint,
     load_checkpoint,
     load_model_state,
+    remap_legacy_state_dict,
     report_state_key_differences,
     strip_module_prefix,
 )
@@ -46,7 +47,7 @@ class NoMaDAlgorithm(Algorithm):
         load_project_folder = os.path.join("logs", load_run)
         print("Loading model from ", load_project_folder)
         latest_checkpoint = load_checkpoint(find_latest_checkpoint(load_project_folder), device)
-        load_model_state(model, latest_checkpoint, strict=False)
+        load_model_state(model, latest_checkpoint, strict=False, model_name=config["model"]["name"])
 
         current_epoch = latest_checkpoint.get("epoch", -1) + 1 if isinstance(latest_checkpoint, dict) else 0
         if current_epoch == 0:
@@ -60,6 +61,8 @@ class NoMaDAlgorithm(Algorithm):
 
         algorithm_state = latest_checkpoint.get("algorithm_state", {}) if isinstance(latest_checkpoint, dict) else {}
         resume_ema_state = algorithm_state.get("ema_model", None)
+        if resume_ema_state is None and isinstance(latest_checkpoint, dict):
+            resume_ema_state = latest_checkpoint.get("ema_model", None)
         ema_latest_path = os.path.join(load_project_folder, "ema_latest.pth")
         if resume_ema_state is None and os.path.exists(ema_latest_path):
             resume_ema_state = torch.load(ema_latest_path, map_location=device)
@@ -96,7 +99,8 @@ class NoMaDAlgorithm(Algorithm):
             ema_model = EMAModel(model=unwrap_model(model), power=float(ema_config.get("power", 0.75)))
             resume_ema = (resume_state.extra or {}).get("ema_state_dict")
             if resume_ema is not None:
-                incompatible = ema_model.averaged_model.load_state_dict(strip_module_prefix(resume_ema), strict=False)
+                ema_state = remap_legacy_state_dict("nomad", strip_module_prefix(resume_ema))
+                incompatible = ema_model.averaged_model.load_state_dict(ema_state, strict=False)
                 report_state_key_differences(incompatible, label="NoMaD EMA state")
         return NoMaDState(noise_scheduler=model_extras["noise_scheduler"], ema_model=ema_model, objective=objective)
 
@@ -113,6 +117,7 @@ class NoMaDAlgorithm(Algorithm):
             "distance": batch.distance.float().to(device, non_blocking=True),
             "action_mask": batch.action_mask.float().to(device, non_blocking=True),
             "goal_pos": batch.goal_pos,
+            "dataset_index": batch.dataset_index,
             "metric_scale": batch.metric_scale,
         }
 
@@ -205,7 +210,9 @@ class NoMaDAlgorithm(Algorithm):
                 batch_action_label=prepared["actions"],
                 batch_dist_label=prepared["distance"],
                 goal_pos=prepared["goal_pos"],
+                dataset_index=prepared["dataset_index"],
                 metric_scale=prepared["metric_scale"],
+                dataset_metadata=config["data"].get("dataset_metadata", {}),
                 device=prepared["obs"].device,
                 mode=mode,
                 project_folder=project_folder,

@@ -29,6 +29,7 @@ class SupervisedWaypointVisualizer:
         goal_pos,
         dataset_index,
         metric_scale,
+        dataset_metadata,
         use_latest,
     ) -> None:
         del num_batches
@@ -50,6 +51,7 @@ class SupervisedWaypointVisualizer:
                 normalized=bool(normalized),
                 dataset_index=dataset_index[i],
                 metric_scale=metric_scale[i],
+                dataset_metadata=dataset_metadata,
                 title=f"{mode} {epoch}:{batch_idx}",
             )
             image_payload.append(recorder.image(path))

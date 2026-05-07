@@ -28,7 +28,7 @@ class SupervisedWaypointAlgorithm(Algorithm):
         load_project_folder = os.path.join("logs", load_run)
         print("Loading model from ", load_project_folder)
         latest_checkpoint = load_checkpoint(find_latest_checkpoint(load_project_folder), device)
-        load_model_state(model, latest_checkpoint, strict=False)
+        load_model_state(model, latest_checkpoint, strict=False, model_name=config["model"]["name"])
 
         current_epoch = latest_checkpoint.get("epoch", -1) + 1 if isinstance(latest_checkpoint, dict) else 0
         optimizer_state = latest_checkpoint.get("optimizer", None) if isinstance(latest_checkpoint, dict) else None
@@ -125,6 +125,7 @@ class SupervisedWaypointAlgorithm(Algorithm):
                 goal_pos=prepared["goal_pos"],
                 dataset_index=prepared["dataset_index"],
                 metric_scale=prepared["metric_scale"],
+                dataset_metadata=config["data"].get("dataset_metadata", {}),
                 use_latest=mode == "train",
             )
 

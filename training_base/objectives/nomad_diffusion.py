@@ -18,6 +18,9 @@ class NoMaDDiffusionObjective:
     def __init__(self, config) -> None:
         self.goal_mask_prob = float(config["goal_mask_prob"])
         self.alpha = float(config["alpha"])
+        self.distance_mask_mode = str(config.get("distance_mask_mode", "per_sample")).lower()
+        if self.distance_mask_mode not in {"per_sample", "legacy_scalar"}:
+            raise ValueError("objective.distance_mask_mode must be one of: per_sample, legacy_scalar")
         self.action_stats = load_action_stats(config.get("action_stats"))
         losses = config.get("losses", {})
         self.distance_loss = get_configured_loss(losses, "distance", "mse")
@@ -45,9 +48,13 @@ class NoMaDDiffusionObjective:
             raise ValueError("action dim must be 2")
 
         dist_pred = model.predict_distance(obsgoal_cond)
-        raw_dist_loss = self.distance_loss(dist_pred.squeeze(-1), distance, reduction="none")
         visible_goal = 1 - goal_mask.float()
-        dist_loss = (raw_dist_loss * visible_goal).mean() / (1e-2 + visible_goal.mean())
+        if self.distance_mask_mode == "legacy_scalar":
+            dist_loss = self.distance_loss(dist_pred.squeeze(-1), distance)
+            dist_loss = (dist_loss * visible_goal).mean() / (1e-2 + visible_goal.mean())
+        else:
+            raw_dist_loss = self.distance_loss(dist_pred.squeeze(-1), distance, reduction="none")
+            dist_loss = (raw_dist_loss * visible_goal).mean() / (1e-2 + visible_goal.mean())
 
         noise = torch.randn_like(naction)
         timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (batch_size,), device=device).long()

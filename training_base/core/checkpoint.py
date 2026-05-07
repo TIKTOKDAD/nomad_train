@@ -5,6 +5,9 @@ from typing import Any, Dict, Optional
 import torch
 
 
+CHECKPOINT_SCHEMA_VERSION = 1
+
+
 @dataclass
 class ResumeState:
     current_epoch: int = 0
@@ -42,6 +45,58 @@ def _format_keys(keys, limit: int = 20) -> str:
     return ", ".join(preview) + suffix
 
 
+def _remap_key_prefix(key: str, mappings) -> str:
+    for old_prefix, new_prefix in mappings:
+        if key.startswith(old_prefix):
+            return f"{new_prefix}{key[len(old_prefix):]}"
+    return key
+
+
+def remap_legacy_state_dict(model_name: Optional[str], state_dict: dict) -> dict:
+    if not model_name or not isinstance(state_dict, dict):
+        return state_dict
+    model_name = str(model_name).lower()
+    mappings = {
+        "gnm": (
+            ("obs_mobilenet.", "encoder.obs_mobilenet."),
+            ("compress_observation.", "encoder.compress_observation."),
+            ("goal_mobilenet.", "encoder.goal_mobilenet."),
+            ("compress_goal.", "encoder.compress_goal."),
+            ("linear_layers.", "encoder.fusion."),
+            ("dist_predictor.0.", "head.dist_predictor."),
+            ("action_predictor.0.", "head.action_predictor."),
+        ),
+        "vint": (
+            ("obs_encoder.", "encoder.obs_encoder."),
+            ("goal_encoder.", "encoder.goal_encoder."),
+            ("compress_obs_enc.", "encoder.compress_obs_enc."),
+            ("compress_goal_enc.", "encoder.compress_goal_enc."),
+            ("decoder.", "encoder.decoder."),
+            ("dist_predictor.0.", "head.dist_predictor."),
+            ("action_predictor.0.", "head.action_predictor."),
+        ),
+        "nomad": (
+            ("noise_pred_net.", "diffusion_model."),
+            ("dist_pred_net.", "distance_predictor."),
+        ),
+    }.get(model_name)
+    if not mappings:
+        return state_dict
+
+    remapped = {}
+    changed = []
+    for key, value in state_dict.items():
+        new_key = _remap_key_prefix(key, mappings)
+        remapped[new_key] = value
+        if new_key != key:
+            changed.append((key, new_key))
+    if changed:
+        preview = ", ".join(f"{old} -> {new}" for old, new in changed[:8])
+        suffix = "" if len(changed) <= 8 else f" ... (+{len(changed) - 8} more)"
+        print(f"Applied legacy {model_name} checkpoint key remap: {preview}{suffix}")
+    return remapped
+
+
 def report_state_key_differences(incompatible, label: str = "Checkpoint model state") -> None:
     missing = list(getattr(incompatible, "missing_keys", []))
     unexpected = list(getattr(incompatible, "unexpected_keys", []))
@@ -53,8 +108,9 @@ def report_state_key_differences(incompatible, label: str = "Checkpoint model st
         )
 
 
-def load_model_state(model, checkpoint: dict, *, strict: bool = False):
-    incompatible = model.load_state_dict(extract_model_state(checkpoint), strict=strict)
+def load_model_state(model, checkpoint: dict, *, strict: bool = False, model_name: Optional[str] = None):
+    state_dict = remap_legacy_state_dict(model_name, extract_model_state(checkpoint))
+    incompatible = model.load_state_dict(state_dict, strict=strict)
     report_state_key_differences(incompatible)
     return incompatible
 
@@ -83,6 +139,7 @@ def save_checkpoint(
     from training_base.core.native_utils import unwrap_model
 
     payload = {
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "epoch": epoch,
         "global_step": global_step,
         "model": unwrap_model(model).state_dict(),

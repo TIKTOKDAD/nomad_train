@@ -323,6 +323,7 @@ Loss recipe。
 - 实现 NoMaD diffusion loss。
 - 从 `objective.losses` 配置中选择具体 loss primitive。
 - 从 `objective.action_stats` 可选配置或默认 `data/data_config.yaml` 读取 NoMaD action normalization 统计。
+- NoMaD 的 `objective.distance_mask_mode` 默认使用 `per_sample`；`legacy_scalar` 只用于严格复现旧训练日志。
 
 `objectives/` 不应该处理 DataLoader、DDP、optimizer step 或完整训练循环。
 
@@ -349,6 +350,8 @@ Loss recipe。
 - 根据 algorithm 准备好的数据和模型输出生成可视化。
 - 通过 `visualizer_registry` 注册。
 - 从 `visualization.train` 和 `visualization.eval` 配置选择。
+- 只消费 `data/` 层注入的 `dataset_metadata`，不直接读取全局 `data/data_config.yaml`。
+- 当 dataset metadata 提供 `camera_metrics` 时支持观测图相机投影；没有时必须自动退化为普通轨迹和图像诊断图。
 
 ### `callbacks/`
 
@@ -500,6 +503,8 @@ class NewVisualizer:
     ...
 ```
 
+如果可视化需要数据集尺度或相机参数，由 `NavigationDataModule` 注入 `data.dataset_metadata`，再由 algorithm 显式传给 visualizer。不要在 visualizer 内部重新读取全局数据配置。
+
 ### Step 7: 新增配置
 
 新增 `configs/<new_model_or_paper>.yaml`。
@@ -557,6 +562,8 @@ runtime:
 6. `--build-lmdb-only` 能构建或验证 LMDB。
 7. 小规模 `torchrun` DDP smoke 能启动。
 8. GNM/ViNT/NoMaD 原有配置没有被新改动破坏。
+9. 新 visualizer 不直接读取全局数据配置。
+10. 新 checkpoint 继续保存为当前 schema；旧 checkpoint 兼容只做只读加载。
 
 ## 7. 判断是否应该修改 `trainer.py`
 
@@ -589,7 +596,8 @@ runtime:
 ## 9. 当前收口规则
 
 - GNM/ViNT 的 encoder 和 waypoint head 必须通过 `module_registry` 构建，`models/` 只负责组装 prebuilt modules。
-- checkpoint 加载默认报告 `missing_keys` 和 `unexpected_keys`，但不自动迁移旧 checkpoint key。
+- checkpoint 加载默认报告 `missing_keys` 和 `unexpected_keys`；对已知 GNM/ViNT/NoMaD 旧格式提供只读 key remap，但新训练只保存当前 `checkpoint_schema_version` 格式。
 - gradient clipping 属于 backward 之后、optimizer step 之前的训练基础设施；`mode: norm` 使用 `clip_grad_norm_`，`mode: value` 使用 `clip_grad_value_`。
-- `NavigationBatch` 显式携带 `metric_scale`，visualizer 不直接读取 `data/data_config.yaml`。
+- `NavigationBatch` 显式携带 `metric_scale`，`NavigationDataModule` 显式注入 `dataset_metadata`，visualizer 不直接读取 `data/data_config.yaml`。
+- NoMaD distance loss 默认使用 `per_sample` mask；`legacy_scalar` 只是旧实验复现开关，不作为新训练默认。
 - `metrics.train/eval` 只承载 cheap light metrics；需要额外 forward、diffusion sampling 或 reverse process 的指标继续放在 `metrics.heavy`。

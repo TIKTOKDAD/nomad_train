@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Dict, Iterable
 
 import torch
@@ -67,6 +68,19 @@ def check_lmdb_caches_ready(config):
     return errors
 
 
+def navigation_dataset_metadata(dataset: NavigationDataset) -> dict:
+    data_config = dataset.data_config or {}
+    return {
+        "name": dataset.dataset_name,
+        "dataset_name": dataset.dataset_name,
+        "dataset_index": int(dataset.dataset_index),
+        "metric_waypoint_spacing": float(data_config.get("metric_waypoint_spacing", 1.0)),
+        "waypoint_spacing": int(dataset.waypoint_spacing),
+        "metric_scale": float(dataset.metric_scale),
+        "camera_metrics": deepcopy(data_config.get("camera_metrics", {})),
+    }
+
+
 def require_lmdb_ready_before_ddp(config) -> None:
     runtime = config["runtime"]
     if not bool(runtime.get("require_lmdb_ready_for_ddp", True)):
@@ -126,6 +140,8 @@ class NavigationDataModule:
         runtime = config["runtime"]
         train_dataset = []
         test_datasets = {}
+        dataset_metadata = {}
+        dataset_metadata_by_name = {}
         distributed_eval = bool(runtime.get("distributed_eval", False))
         lmdb_cache_mode = self._lmdb_cache_mode(build_lmdb_only)
 
@@ -170,11 +186,16 @@ class NavigationDataModule:
                     lmdb_cache_mode=lmdb_cache_mode,
                     rebuild_incomplete_lmdb=bool(runtime.get("rebuild_incomplete_lmdb", False)),
                 )
+                metadata = navigation_dataset_metadata(dataset)
+                dataset_metadata[str(dataset.dataset_index)] = metadata
+                dataset_metadata_by_name[dataset.dataset_name] = metadata
                 if split == "train":
                     train_dataset.append(dataset)
                 else:
                     test_datasets[f"{dataset_name}_{split}"] = dataset
 
+        data["dataset_metadata"] = dataset_metadata
+        data["dataset_metadata_by_name"] = dataset_metadata_by_name
         if self.context.distributed and self.context.is_main_process:
             barrier()
         return train_dataset, test_datasets

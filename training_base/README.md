@@ -99,11 +99,40 @@ schedulers.
 
 Paper-specific EMA belongs in `algorithm`, for example `algorithm.ema`, while reusable checkpointing stays in `callbacks`.
 
-Checkpoint loading reports missing and unexpected model keys. It does not
-silently migrate old checkpoint layouts.
+If the new paper reuses the visual-navigation batch contract, do not change
+`trainer.py`. Extend `NavigationBatch` and the paper's `Algorithm` only when
+the input/output protocol genuinely changes.
 
-Visualization receives dataset metric scale from the batch prepared by the
-algorithm; visualizers should not read global dataset config files directly.
+## Checkpoints
+
+New runs are saved in the `training_base` checkpoint schema with
+`checkpoint_schema_version`, `model`, `optimizer`, `scheduler`,
+`algorithm_state`, `config`, `global_step`, and `eval_summaries`.
+
+Old GNM, ViNT, and NoMaD checkpoints are read-only compatible where the legacy
+module names are known. Loading reports missing and unexpected model keys after
+the remap attempt, so incompatible weights are visible instead of being silently
+ignored. The old layout is not used for new saves.
+
+## Visualization
+
+Dataset visualization metadata is injected by `NavigationDataModule` through
+`data.dataset_metadata`. Visualizers consume that metadata and should not read
+global dataset config files directly.
+
+Trajectory plots include the bird's-eye comparison, observation image, goal
+image, distance prediction/label, and camera projection overlays when
+`camera_metrics` are available. Missing camera metadata or missing OpenCV falls
+back to the non-projected observation panel.
+
+NoMaD action visualizations keep goal-conditioned samples, unconditioned samples,
+and ground truth visually separated so diffusion behavior remains diagnosable.
+
+## NoMaD Compatibility
+
+`objective.distance_mask_mode` controls the distance loss compatibility mode:
+`per_sample` is the default and masks each sample independently, while
+`legacy_scalar` exists only for strict reproduction of old `train_nofix` logs.
 
 Gradient clipping is applied after backward and before the optimizer step.
 The trainer should not need paper-specific branches.
