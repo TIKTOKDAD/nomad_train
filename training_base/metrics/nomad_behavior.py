@@ -11,6 +11,7 @@ from typing import Dict
 import torch
 
 from training_base.data.action_stats import get_action_torch, load_action_stats
+from training_base.core.native_utils import unwrap_model
 from training_base.metrics.action_metrics import flattened_waypoint_cosine, waypoint_cosine, waypoint_mse
 from training_base.registry import loss_registry, metric_registry
 
@@ -28,6 +29,7 @@ def model_output(
     device: torch.device,
     action_stats=None,
 ):
+    model = unwrap_model(model)
     # 准备动作统计与条件编码
     action_stats = load_action_stats(action_stats)
     # goal_mask=1 表示屏蔽目标图，得到 unconditional/exploration 条件

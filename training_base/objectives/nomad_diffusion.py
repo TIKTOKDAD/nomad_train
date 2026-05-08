@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from training_base.data.action_stats import get_delta_torch, load_action_stats, normalize_data_torch
+from training_base.core.native_utils import unwrap_model
 from training_base.losses import action_reduce, get_configured_loss
 from training_base.registry import objective_registry
 
@@ -54,6 +55,7 @@ class NoMaDDiffusionObjective:
         action_mask: torch.Tensor,
         device: torch.device,
     ) -> Dict[str, torch.Tensor]:
+        model = unwrap_model(model)
         batch_size = actions.shape[0]
         # 采样 goal mask，并编码观测/目标条件
         goal_mask = sample_goal_mask(batch_size, self.goal_mask_prob, device)
@@ -110,6 +112,7 @@ class NoMaDDiffusionObjective:
         actions: torch.Tensor,
         device: torch.device,
     ) -> Dict[str, torch.Tensor]:
+        model = unwrap_model(model)
         batch_size = actions.shape[0]
         # 三种条件分别评估：训练式随机 mask、完全有目标、完全无目标
         rand_goal_mask = sample_goal_mask(batch_size, self.goal_mask_prob, device)
