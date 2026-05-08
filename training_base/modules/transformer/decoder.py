@@ -1,3 +1,11 @@
+# ============================================================
+# Transformer decoder blocks - positional encoding and MLP output
+# ============================================================
+# 本文件提供 ViNT 使用的 token 融合模块：
+# 1. PositionalEncoding 为观测/目标 token 注入顺序信息
+# 2. MultiLayerDecoder 使用 TransformerEncoder 融合 token
+# 3. 输出 MLP 将 [B, seq_len, embed_dim] 展平成固定维特征
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

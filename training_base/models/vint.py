@@ -1,3 +1,11 @@
+# ============================================================
+# ViNT model wrapper - encoder plus waypoint head
+# ============================================================
+# 本文件保持和 GNM 相同的监督模型外壳：
+# 1. ViNTEncoder 负责 EfficientNet + Transformer 融合
+# 2. WaypointPredictionHead 负责距离和轨迹输出
+# 3. Trainer/Algorithm 可以用相同接口训练 GNM 与 ViNT
+
 from typing import Optional, Tuple
 
 import torch
@@ -5,6 +13,7 @@ import torch
 from training_base.models.base import BaseModel
 
 
+# ViNT 模型：编码器 + 预测头
 class ViNT(BaseModel):
     def __init__(
         self,
@@ -15,13 +24,16 @@ class ViNT(BaseModel):
         head=None,
     ) -> None:
         super().__init__(context_size, len_traj_pred, learn_angle)
+        # encoder/head 由 models.__init__.build_vint 负责组装，这里只做完整性检查
         if encoder is None or head is None:
             raise ValueError("ViNT requires prebuilt encoder and head modules.")
         self.encoder = encoder
         self.head = head
 
+    # 前向：提取特征并预测距离/动作
     def forward(
         self, obs_img: torch.Tensor, goal_img: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # 编码器输出定长融合特征，head 再产生两个任务头输出
         features = self.encoder(obs_img, goal_img)
         return self.head(features)

@@ -175,39 +175,64 @@ recon:
 
 # openloris:
 #   metric_waypoint_spacing: 0.175
+# ---------- botanic 数据集 ----------
+# metric_waypoint_spacing 为该数据集中相邻原始 waypoint 的平均米制距离。
+# Dataset.normalize=True 时，动作坐标会除以该值（再乘 waypoint_spacing）。
 botanic:
   metric_waypoint_spacing: 0.3535821735858917
 
+# ---------- cid_sims 数据集 ----------
+# 仿真/采集数据的物理步长，用于把归一化动作还原成真实尺度。
 cid_sims:
   metric_waypoint_spacing: 0.1327759176492691
 
+# ---------- go_stanford 数据集 ----------
+# GO Stanford 的步长较小，通常对应更细粒度的导航控制。
 go_stanford:
   metric_waypoint_spacing: 0.13087551295757294
 
+# ---------- ground_challenge 数据集 ----------
+# 地面挑战数据集的平均 waypoint 间距。
 ground_challenge:
   metric_waypoint_spacing: 0.16281618177890778
 
+# ---------- huron 数据集 ----------
+# Huron 数据集的平均 waypoint 间距。
 huron:
   metric_waypoint_spacing: 0.259044349193573
 
+# ---------- i2nav 数据集 ----------
+# i2nav 步长较大，归一化后可与其他数据集共同训练。
 i2nav:
   metric_waypoint_spacing: 0.39555105566978455
 
+# ---------- locobot_new 数据集 ----------
+# Locobot 数据集的米制步长，用于动作尺度对齐。
 locobot_new:
   metric_waypoint_spacing: 0.13057610392570496
 
+# ---------- musohu 数据集 ----------
+# musohu 数据集的平均 waypoint 间距。
 musohu:
   metric_waypoint_spacing: 0.34705862402915955
 
+# ---------- openloris 数据集 ----------
+# OpenLORIS 数据集的平均 waypoint 间距。
 openloris:
   metric_waypoint_spacing: 0.1756359487771988
 
+# ---------- recon 数据集（实际生效覆盖项） ----------
+# 注意：YAML 中同名 key 后者覆盖前者；此处 recon 会覆盖上方带 camera_metrics 的 recon。
 recon:
   metric_waypoint_spacing: 0.25466689467430115
 
+# ---------- rellis 数据集 ----------
+# RELLIS 数据集的平均 waypoint 间距。
 rellis:
   metric_waypoint_spacing: 0.37686583399772644
 
+# ---------- scand 数据集 ----------
+# SCAND 数据集的平均 waypoint 间距。
 scand:
   metric_waypoint_spacing: 0.3595160245895386
 

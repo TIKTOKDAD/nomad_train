@@ -1,78 +1,140 @@
+# ============================================================
+# NoMaD resume experiment config
+# ============================================================
+# 本文件用于从已有 NoMaD run 恢复训练。
+# 关键差异在 runtime.load_run，模型/目标/优化器结构需与待恢复 checkpoint 兼容。
+
 algorithm:
+  # 算法注册名：使用 NoMaDAlgorithm
   name: nomad
+  # EMA 配置：恢复时会优先读取 checkpoint/ema_latest.pth 中的 EMA 权重
   ema:
+    # 是否启用 EMA
     enabled: true
+    # EMA 衰减因子
     power: 0.75
 
 runtime:
+  # 项目名称：新恢复实验的日志根目录
   project_name: nomad
+  # 本次运行名称：用于区分 resume run
   run_name: nomad-resume
+  # 从已有运行中加载：实际路径为 logs/<load_run>/latest.pth
   load_run: nomad/latest
 
 data:
+  # 上下文帧数：必须与恢复权重的视觉编码器结构一致
   context_size: 3
+  # 图像尺寸（宽, 高）：必须与恢复权重训练时一致
   image_size: [96, 96]
+  # 预测航点数量：影响扩散 U-Net 输出序列长度
   len_traj_pred: 8
+  # 是否学习角度：NoMaD 当前只训练二维动作
   learn_angle: false
+  # 动作类别范围
   action:
+    # 最小动作类别
     min_dist_cat: 3
+    # 最大动作类别
     max_dist_cat: 20
 
 model:
+  # 模型注册名：恢复时也用该名称做旧权重 key remap
   name: nomad
+  # 视觉编码器配置：结构字段需和 checkpoint 对齐
   vision_encoder:
+    # 编码器类型
     name: masked_vint
+    # 观测编码器骨干
     obs_encoder: efficientnet-b0
+    # 编码维度
     encoding_size: 256
+    # Transformer 配置
     transformer:
+      # 注意力头数
       num_heads: 4
+      # 层数
       num_layers: 4
+      # 前馈层维度因子
       ff_dim_factor: 4
+  # 扩散模型主干
   diffusion:
+    # UNet 类型
     name: conditional_unet1d
+    # 输入维度（动作维度）
     input_dim: 2
+    # 下采样通道数
     down_dims: [64, 128, 256]
+    # 是否预测条件缩放
     cond_predict_scale: false
+  # 扩散调度器
   diffusion_scheduler:
+    # 调度器名称
     name: ddpm
+    # 训练时间步数
     num_train_timesteps: 10
+  # 距离预测分支
   distance_predictor:
+    # 预测器名称
     name: distance_mlp
+    # 特征维度
     embedding_dim: 256
 
 objective:
+  # 目标函数名称：NoMaD 扩散损失
   name: nomad_diffusion
+  # 目标图像遮蔽概率：恢复后继续沿用该训练策略
   goal_mask_prob: 0.5
+  # 距离损失权重
   alpha: 1e-4
+  # 距离掩码策略
   distance_mask_mode: per_sample
+  # 子损失配置
   losses:
+    # 扩散损失
     diffusion: mse
+    # 距离损失
     distance: mse
 
 optimizer:
+  # 优化器名称
   name: adamw
+  # 学习率
   lr: 1e-4
 
 scheduler:
+  # 调度器名称
   name: cosine
+  # 总 epoch 数
   epochs: 100
+  # 初始学习率
   lr: 1e-4
+  # warmup 配置
   warmup:
+    # 是否启用 warmup
     enabled: true
+    # warmup epoch 数
     epochs: 2
 
 metrics:
+  # 重指标列表
   heavy:
     - name: nomad_behavior
 
 visualization:
+  # 训练阶段可视化器
   train:
     - name: nomad_action_distribution
+  # 评估阶段可视化器
   eval:
     - name: nomad_action_distribution
 
 callbacks:
+  # 检查点保存回调
   - name: checkpoint
+    # 每个 epoch 保存 latest
     save_latest_every_epoch: true
+    # 周期性保存历史 checkpoint
     checkpoint_freq: 5
+  # 性能监控回调
   - name: perf_monitor

@@ -1,57 +1,107 @@
+# ============================================================
+# ViNT experiment config
+# ============================================================
+# 本文件覆盖 defaults.yaml 中与 ViNT 相关的训练参数。
+# ViNT 仍是 supervised_waypoint 目标，但视觉编码器为 EfficientNet + Transformer token 融合。
+
 algorithm:
+  # 算法注册名：对应 training_base.algorithms.vint.ViNTAlgorithm
   name: vint
 
 runtime:
+  # 项目名称：决定日志目录 logs/<project_name>/<run_name>_timestamp
   project_name: vint-release
+  # 本次运行名称：CLI 会追加时间戳
   run_name: vint
+  # 是否执行训练
   train: true
+  # 训练 batch_size：单卡/单进程下每步样本数
   batch_size: 256
+  # 评估 batch_size：测试 DataLoader 使用
   eval_batch_size: 256
+  # 训练 epoch 数
   epochs: 100
+  # GPU 列表：非 torchrun 时用于 CUDA_VISIBLE_DEVICES
   gpu_ids: [0]
+  # DataLoader worker 数：训练集加载 worker
   num_workers: 12
 
 data:
+  # 是否对动作归一化：影响 Dataset 返回的 action_label/goal_pos 尺度
   normalize: true
+  # 上下文采样类型：temporal 表示连续历史帧
   context_type: temporal
+  # 上下文帧数：ViNT 编码器 token 数 = context_size + 2
   context_size: 5
+  # 图像尺寸（宽, 高）：ViNT 原始配置常用 85x64
   image_size: [85, 64]
+  # 目标类型：当前实现只支持 image
   goal_type: image
+  # 预测航点数量
   len_traj_pred: 5
+  # 是否学习角度：true 时动作头输出 4 维 (x,y,cos,sin)
   learn_angle: true
+  # 距离类别范围：用于目标采样和距离标签
   distance:
+    # 最小距离类别（航点步）
     min_dist_cat: 0
+    # 最大距离类别（航点步）
     max_dist_cat: 20
+  # 动作类别范围：控制动作损失有效样本
   action:
+    # 最小动作类别（航点步）
     min_dist_cat: 0
+    # 最大动作类别（航点步）
     max_dist_cat: 10
+  # 数据集配置：实际训练时填入 data_folder/train/test/waypoint_spacing 等
   datasets: {}
 
 model:
+  # 模型注册名：对应 training_base.models.build_vint
   name: vint
+  # 观测编码器骨干：传给 EfficientNet.from_name
   obs_encoder: efficientnet-b0
+  # 观测编码维度：EfficientNet 输出压缩到该维度
   obs_encoding_size: 512
+  # 是否启用 late_fusion：false 时目标分支输入当前观测+目标图的 6 通道拼接
   late_fusion: false
+  # Transformer 配置：控制 ViNT token 融合层
   transformer:
+    # 注意力头数
     num_heads: 4
+    # TransformerEncoder 层数
     num_layers: 4
+    # 前馈层维度因子：ff_dim = ff_dim_factor * obs_encoding_size
     ff_dim_factor: 4
 
 objective:
+  # 目标函数注册名
   name: supervised_waypoint
+  # 距离/动作损失权重
   alpha: 0.5
 
 optimizer:
+  # 优化器名称
   name: adamw
+  # 学习率
   lr: 5e-4
+  # 梯度裁剪配置
   gradient_clip:
+    # 是否启用裁剪
     enabled: false
+    # 最大范数
     max_norm: 1.0
 
 scheduler:
+  # 调度器注册名：cosine 对应 CosineAnnealingLR
   name: cosine
+  # 总 epoch 数：作为 cosine T_max
   epochs: 100
+  # 初始学习率：供 scheduler builder 补齐 lr
   lr: 5e-4
+  # warmup 配置：启用时先 GradualWarmupScheduler 再接 cosine
   warmup:
+    # 是否启用 warmup
     enabled: true
+    # warmup epoch 数
     epochs: 4

@@ -1,131 +1,242 @@
-# Navigation training base defaults.
+# ============================================================
+# 训练基座默认配置（导航任务）
+# ============================================================
+# 该文件提供所有实验的基础默认值，其他配置文件可覆盖这里的字段。
+# 注：每个字段旁的中文注释说明用途与取值含义。
+# 合并规则：defaults.yaml 先加载，用户配置后加载；用户配置中的字段覆盖这里的默认值。
+# 结构约定：algorithm/model/objective/optimizer/scheduler 等 name 字段都对应 registry key。
 
 algorithm:
+  # 算法名称（对应 registry 中的 key）
   name: gnm
 
 runtime:
+  # 项目名称（日志输出目录的一级路径）
   project_name: navigation
+  # 本次运行名称（日志输出目录的二级路径）
   run_name: default
+  # 是否执行训练阶段
   train: true
+  # 训练批次大小（可能会被 global_batch_size 覆盖）
   batch_size: 400
+  # 评估批次大小
   eval_batch_size: 400
+  # 训练总 epoch 数
   epochs: 30
+  # 需要使用的 GPU ID 列表
   gpu_ids: [0]
+  # DataLoader worker 总数（可能按分布式自动折分）
   num_workers: 4
+  # 随机种子（用于可复现实验）
   seed: 0
+  # 训练数据子集比例（1.0 表示全量）
   train_subset: 1.0
+  # 是否启用分布式训练
   distributed: true
+  # 多 GPU 时强制要求使用 DDP
   require_ddp_for_multigpu: true
+  # 全局 batch_size（若非空，将覆盖 batch_size）
   global_batch_size: null
+  # 是否启用确定性算法（可能降低速度）
   deterministic: false
+  # 是否启用 cuDNN benchmark（加速卷积）
   cudnn_benchmark: true
+  # DDP 静态图模式（提升性能）
   ddp_static_graph: false
+  # DDP 梯度视图优化
   ddp_gradient_as_bucket_view: true
+  # DDP 广播 buffer（如 BN 统计）
   ddp_broadcast_buffers: true
+  # 是否寻找未使用参数（与分支结构有关）
   find_unused_parameters: false
+  # DataLoader 是否启用 pin_memory
   pin_memory: true
+  # DataLoader 预取因子
   prefetch_factor: 2
+  # DataLoader 是否保持 worker 常驻
   persistent_workers: true
+  # num_workers 是否为全局值（分布式时自动均分）
   num_workers_is_global: true
+  # 每个进程的 worker 数（若设置则优先使用）
   num_workers_per_rank: null
+  # 测试/评估阶段 worker 数
   test_num_workers: 4
+  # 测试 worker 是否为全局值
   test_num_workers_is_global: true
+  # 测试阶段是否保持 worker 常驻
   test_persistent_workers: true
+  # 是否启用分布式评估
   distributed_eval: false
+  # 评估时使用的数据比例（0~1）
   eval_fraction: 0.25
+  # 每隔多少个 epoch 评估一次
   eval_freq: 1
+  # 仅构建 LMDB 缓存（不训练）
   build_lmdb_only: false
+  # DDP 前是否强制检查 LMDB 缓存完整性
   require_lmdb_ready_for_ddp: true
+  # 是否删除不完整缓存并重建
   rebuild_incomplete_lmdb: false
+  # LMDB 缓存模式：auto/read/build
   lmdb_cache_mode: auto
+  # LMDB 是否加读锁（多 worker 场景建议关闭）
   lmdb_lock: false
+  # LMDB 是否启用 readahead
   lmdb_readahead: false
+  # LMDB 是否初始化内存页
   lmdb_meminit: false
+  # LMDB 最大读者数量
   lmdb_max_readers: 512
+  # 是否启用 AMP 混合精度
   amp: false
+  # AMP 计算精度（fp16/bf16）
   amp_dtype: fp16
+  # 是否使用 GradScaler
   use_grad_scaler: true
 
 data:
+  # 是否对动作进行归一化
   normalize: true
+  # 上下文采样类型（temporal/randomized/...）
   context_type: temporal
+  # 上下文帧数（历史帧数量）
   context_size: 5
+  # 观测类型（当前仅支持 image）
   obs_type: image
+  # 目标类型（当前仅支持 image）
   goal_type: image
+  # 图像尺寸（宽, 高）
   image_size: [85, 64]
+  # 预测轨迹长度（航点数量）
   len_traj_pred: 5
+  # 是否学习角度（yaw）
   learn_angle: true
+  # 距离类别范围（用于距离分类/回归标签）
   distance:
+    # 最小距离类别（航点步）
     min_dist_cat: 0
+    # 最大距离类别（航点步）
     max_dist_cat: 20
+  # 动作有效范围（用于动作掩码）
   action:
+    # 动作最小距离类别
     min_dist_cat: 2
+    # 动作最大距离类别
     max_dist_cat: 10
+  # 近/远阈值（用于可视化或统计）
   close_far_threshold: 10
+  # 数据集配置（由具体实验填充）
   datasets: {}
 
 model:
+  # 模型名称（registry key）
   name: gnm
+  # 观测编码特征维度
   obs_encoding_size: 1024
+  # 目标编码特征维度
   goal_encoding_size: 1024
+  # 观测编码器骨干
   obs_encoder: efficientnet-b0
+  # 是否启用 late_fusion（ViNT 相关）
   late_fusion: false
+  # Transformer 配置（ViNT/Masked ViNT 等）
   transformer:
+    # 多头注意力头数
     num_heads: 4
+    # 注意力层数
     num_layers: 4
+    # 前馈层维度因子（ff_dim = factor * embed_dim）
     ff_dim_factor: 4
 
 objective:
+  # 目标函数名称
   name: supervised_waypoint
+  # 距离损失与动作损失的权重系数
   alpha: 0.5
+  # 子损失函数配置
   losses:
+    # 距离损失类型
     distance: mse
+    # 动作损失类型
     action: mse
 
 optimizer:
+  # 优化器名称
   name: adam
+  # 学习率
   lr: 5e-4
+  # 梯度裁剪配置
   gradient_clip:
+    # 是否启用裁剪
     enabled: false
+    # 最大范数
     max_norm: 1.0
 
 scheduler:
+  # 调度器名称（none/cosine/cyclic/plateau）
   name: none
+  # warmup 配置（可选）
   warmup:
+    # 是否启用 warmup
     enabled: false
+    # warmup 的 epoch 数
     epochs: 1
+  # CyclicLR 周期长度
   cyclic_period: 10
+  # ReduceLROnPlateau 容忍 epoch 数
   plateau_patience: 3
+  # ReduceLROnPlateau 衰减系数
   plateau_factor: 0.5
 
 metrics:
+  # 训练阶段轻量指标
   train: []
+  # 评估阶段轻量指标
   eval: []
+  # 重指标（如行为评估）
   heavy: []
 
 logging:
+  # 指标日志频率（步）
   metric_log_freq: 100
+  # 图像日志频率（步）
   image_log_freq: 1000
+  # 重指标日志频率（步）
   heavy_metric_log_freq: 1000
+  # 重指标开始步数
   heavy_metric_start_step: 1000
+  # 图像日志开始步数
   image_start_step: 3000
+  # 性能日志频率（步）
   perf_log_freq: 50
+  # 是否按 global_step 统计频率
   by_global_step: true
+  # 是否在第 0 步也记录
   first_step: false
+  # 控制移动平均窗口大小
   window_size: 100
+  # 日志 sink 列表（console/wandb 等）
   sinks:
     - name: console
 
 visualization:
+  # 每次可视化记录的图片数量
   num_images_log: 8
+  # 动作采样数量（NoMaD 可用）
   num_action_samples_log: 8
+  # 训练阶段可视化器列表
   train:
     - name: supervised_waypoint
+  # 评估阶段可视化器列表
   eval:
     - name: supervised_waypoint
 
 callbacks:
+  # 检查点保存回调
   - name: checkpoint
+    # 每个 epoch 保存 latest
     save_latest_every_epoch: true
+    # 按频率保存历史 checkpoint
     checkpoint_freq: 5
+  # 性能监控回调
   - name: perf_monitor

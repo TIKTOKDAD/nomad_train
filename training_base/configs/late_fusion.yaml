@@ -1,20 +1,39 @@
+# ============================================================
+# ViNT late-fusion override config
+# ============================================================
+# 本文件是 ViNT 的小型覆盖配置，只突出 late_fusion=True 的差异。
+# 未写出的 runtime/data/optimizer/scheduler 等字段会从 defaults.yaml 继承。
+
 algorithm:
+  # 算法注册名：仍使用监督航点 ViNTAlgorithm
   name: vint
 
 runtime:
+  # 项目名称：日志目录的一级路径
   project_name: vint-release
+  # 本次运行名称：用于区分 late_fusion 实验
   run_name: vint-late-fusion
 
 model:
+  # 模型注册名：对应 build_vint
   name: vint
+  # 观测编码器骨干：EfficientNet 变体名称
   obs_encoder: efficientnet-b0
+  # 观测/目标 token 的编码维度
   obs_encoding_size: 512
+  # 启用 late_fusion：目标图单独编码，和观测 token 在 Transformer 层融合
   late_fusion: true
+  # Transformer 配置：控制 token 融合深度与宽度
   transformer:
+    # 注意力头数
     num_heads: 4
+    # TransformerEncoder 层数
     num_layers: 4
+    # 前馈层维度因子：ff_dim = factor * obs_encoding_size
     ff_dim_factor: 4
 
 objective:
+  # 目标函数名称：监督式距离 + 航点损失
   name: supervised_waypoint
+  # 距离/动作损失权重
   alpha: 0.5

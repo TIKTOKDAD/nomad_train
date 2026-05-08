@@ -1,234 +1,453 @@
+# ============================================================
+# NoMaD retrain config - multi-dataset DDP training
+# ============================================================
+# 本文件是当前 NoMaD 重新训练的完整实验配置：
+# 1. runtime 部分控制 DDP、DataLoader、LMDB、AMP 和日志频率
+# 2. data 部分列出多数据集路径与采样策略
+# 3. model/objective 部分配置 masked_vint + diffusion + distance head
+# 4. callbacks/logging/visualization 部分控制检查点、性能监控和轨迹图输出
+
 algorithm:
+  # 算法注册名：对应 NoMaDAlgorithm
   name: nomad
+  # EMA 配置：评估和可视化优先使用 averaged_model，提升扩散采样稳定性
   ema:
+    # 是否启用 EMA
     enabled: true
+    # EMA 衰减因子
     power: 0.75
 
 runtime:
+  # 项目名称：日志目录一级路径 logs/<project_name>/...
   project_name: nomade_new_datatset_fix_5_6_3
+  # 本次运行名称：CLI 会追加时间戳生成最终 run_name
   run_name: nomad
+  # 是否执行训练
   train: true
+  # 训练批次大小
   batch_size: 256
+  # 评估批次大小
   eval_batch_size: 256
+  # 训练 epoch 数
   epochs: 100
+  # 使用的 GPU 列表：torchrun 外层应与该列表保持一致
   gpu_ids: [0, 1, 2, 3]
+  # DataLoader worker 总数：num_workers_is_global=true 时会按 world_size 均分
   num_workers: 48
+  # 随机种子
   seed: 0
+  # 是否启用分布式训练
   distributed: true
+  # 多 GPU 时强制要求使用 DDP
   require_ddp_for_multigpu: true
+  # 全局 batch_size：DDP 下表示所有 rank 合计 batch；每卡 batch=global/world_size
   global_batch_size: 256
+  # 是否启用确定性算法
   deterministic: false
+  # 是否启用 cuDNN benchmark
   cudnn_benchmark: true
+  # DDP 静态图模式：模型图固定时可减少 bucket rebuild 开销
   ddp_static_graph: true
+  # DDP 梯度视图优化
   ddp_gradient_as_bucket_view: true
+  # DDP 广播 buffer
   ddp_broadcast_buffers: true
+  # 是否寻找未使用参数
   find_unused_parameters: false
+  # 是否启用 pin_memory
   pin_memory: true
+  # DataLoader 预取因子：每个 worker 预加载的 batch 数
   prefetch_factor: 4
+  # DataLoader worker 常驻
   persistent_workers: true
+  # num_workers 是否为全局值
   num_workers_is_global: true
+  # 每个进程的 worker 数（若设置则优先使用）
   num_workers_per_rank: null
+  # 测试 worker 数
   test_num_workers: 8
+  # 测试 worker 是否为全局值
   test_num_workers_is_global: true
+  # 测试阶段是否常驻 worker
   test_persistent_workers: true
+  # 是否启用分布式评估
   distributed_eval: false
+  # 评估子集比例
   eval_fraction: 0.2
+  # 评估频率（epoch）
   eval_freq: 5
+  # 仅构建 LMDB 缓存
   build_lmdb_only: false
+  # DDP 前是否强制检查 LMDB：true 时要求先单进程 build-lmdb-only
   require_lmdb_ready_for_ddp: true
+  # 是否重建不完整 LMDB
   rebuild_incomplete_lmdb: false
+  # LMDB 缓存模式：auto=缺失时构建，read=只读已完成缓存，build=只构建缓存
   lmdb_cache_mode: auto
+  # LMDB 是否加读锁
   lmdb_lock: false
+  # LMDB 是否启用 readahead
   lmdb_readahead: false
+  # LMDB 是否初始化内存页
   lmdb_meminit: false
+  # LMDB 最大读者数
   lmdb_max_readers: 1024
+  # 是否启用 AMP
   amp: false
+  # AMP 精度
   amp_dtype: fp16
+  # 是否使用 GradScaler
   use_grad_scaler: true
 
 data:
+  # 是否对动作归一化：NoMaD diffusion 会再基于 action_stats 处理动作增量
   normalize: true
+  # 上下文采样类型
   context_type: temporal
+  # 上下文帧数
   context_size: 3
+  # 观测类型
   obs_type: image
+  # 目标类型
   goal_type: image
+  # 图像尺寸（宽, 高）
   image_size: [96, 96]
+  # 预测航点数量：扩散模型动作序列长度
   len_traj_pred: 8
+  # 是否学习角度：NoMaD 当前动作扩散只建模二维 dx/dy
   learn_angle: false
+  # 距离类别范围
   distance:
+    # 最小距离类别
     min_dist_cat: 0
+    # 最大距离类别
     max_dist_cat: 20
+  # 动作类别范围
   action:
+    # 最小动作类别
     min_dist_cat: 3
+    # 最大动作类别
     max_dist_cat: 20
+  # 数据集配置：每个数据集需要 data_folder、train/test split、end_slack 和采样参数
   datasets:
+    # recon 数据集
     recon:
+      # 数据集根目录
       data_folder: ../datasets/recon
+      # 训练集分割路径
       train: ../data_splits/recon/train/
+      # 测试集分割路径
       test: ../data_splits/recon/test/
+      # 序列末端允许的 slack：忽略轨迹末端可能不稳定/碰撞的帧
       end_slack: 3
+      # 每个观测采样的目标数量
       goals_per_obs: 1
+      # 是否启用负样本挖掘
       negative_mining: true
+    # go_stanford 数据集
     go_stanford:
+      # 数据集根目录
       data_folder: ../datasets/go_stanford
+      # 训练集分割路径
       train: ../data_splits/go_stanford/train/
+      # 测试集分割路径
       test: ../data_splits/go_stanford/test/
+      # 序列末端 slack
       end_slack: 0
+      # 每个观测采样的目标数量
       goals_per_obs: 2
+      # 是否启用负样本挖掘
       negative_mining: true
+    # huron 数据集
     huron:
+      # 数据集根目录
       data_folder: ../datasets/huron/
+      # 训练集分割路径
       train: ../data_splits/huron/train/
+      # 测试集分割路径
       test: ../data_splits/huron/test/
+      # 序列末端 slack
       end_slack: 3
+      # 每个观测采样的目标数量
       goals_per_obs: 1
+      # 是否启用负样本挖掘
       negative_mining: true
+    # scand 数据集
     scand:
+      # 数据集根目录
       data_folder: ../datasets/scand/
+      # 训练集分割路径
       train: ../data_splits/scand/train/
+      # 测试集分割路径
       test: ../data_splits/scand/test/
+      # 序列末端 slack
       end_slack: 0
+      # 每个观测采样的目标数量
       goals_per_obs: 1
+      # 是否启用负样本挖掘
       negative_mining: true
+    # locobot_new 数据集
     locobot_new:
+      # 数据集根目录
       data_folder: ../datasets/locobot_new
+      # 训练集分割路径
       train: ../data_splits/locobot_new/train/
+      # 测试集分割路径
       test: ../data_splits/locobot_new/test/
+      # 序列末端 slack
       end_slack: 3
+      # 每个观测采样的目标数量
       goals_per_obs: 2
+      # 是否启用负样本挖掘
       negative_mining: true
+    # i2nav 数据集
     i2nav:
+      # 数据集根目录
       data_folder: ../datasets/i2nav
+      # 训练集分割路径
       train: ../data_splits/i2nav/train/
+      # 测试集分割路径
       test: ../data_splits/i2nav/test/
+      # 序列末端 slack
       end_slack: 2
+      # 每个观测采样的目标数量
       goals_per_obs: 2
+      # 是否启用负样本挖掘
       negative_mining: true
+    # cid_sims 数据集
     cid_sims:
+      # 数据集根目录
       data_folder: ../datasets/cid_sims
+      # 训练集分割路径
       train: ../data_splits/cid_sims/train/
+      # 测试集分割路径
       test: ../data_splits/cid_sims/test/
+      # 序列末端 slack
       end_slack: 2
+      # 每个观测采样的目标数量
       goals_per_obs: 2
+      # 是否启用负样本挖掘
       negative_mining: true
+    # openloris 数据集
     openloris:
+      # 数据集根目录
       data_folder: ../datasets/openloris
+      # 训练集分割路径
       train: ../data_splits/openloris/train/
+      # 测试集分割路径
       test: ../data_splits/openloris/test/
+      # 序列末端 slack
       end_slack: 2
+      # 每个观测采样的目标数量
       goals_per_obs: 2
+      # 是否启用负样本挖掘
       negative_mining: true
+    # musohu 数据集
     musohu:
+      # 数据集根目录
       data_folder: ../datasets/musohu
+      # 训练集分割路径
       train: ../data_splits/musohu/train/
+      # 测试集分割路径
       test: ../data_splits/musohu/test/
+      # 序列末端 slack
       end_slack: 2
+      # 每个观测采样的目标数量
       goals_per_obs: 1
+      # 是否启用负样本挖掘
       negative_mining: true
+    # ground_challenge 数据集
     ground_challenge:
+      # 数据集根目录
       data_folder: ../datasets/ground_challenge
+      # 训练集分割路径
       train: ../data_splits/ground_challenge/train/
+      # 测试集分割路径
       test: ../data_splits/ground_challenge/test/
+      # 序列末端 slack
       end_slack: 2
+      # 每个观测采样的目标数量
       goals_per_obs: 2
+      # 是否启用负样本挖掘
       negative_mining: true
+    # botanic 数据集
     botanic:
+      # 数据集根目录
       data_folder: ../datasets/botanic
+      # 训练集分割路径
       train: ../data_splits/botanic/train/
+      # 测试集分割路径
       test: ../data_splits/botanic/test/
+      # 序列末端 slack
       end_slack: 2
+      # 每个观测采样的目标数量
       goals_per_obs: 2
+      # 是否启用负样本挖掘
       negative_mining: true
+    # rellis 数据集
     rellis:
+      # 数据集根目录
       data_folder: ../datasets/rellis
+      # 训练集分割路径
       train: ../data_splits/rellis/train/
+      # 测试集分割路径
       test: ../data_splits/rellis/test/
+      # 序列末端 slack
       end_slack: 2
+      # 每个观测采样的目标数量
       goals_per_obs: 2
+      # 是否启用负样本挖掘
       negative_mining: true
 
 model:
+  # 模型注册名：对应 build_nomad
   name: nomad
+  # 视觉编码器配置：输出 diffusion 和 distance_predictor 共享的条件向量
   vision_encoder:
+    # 编码器类型：masked_vint 支持 goal_mask
     name: masked_vint
+    # 观测编码器骨干
     obs_encoder: efficientnet-b0
+    # 编码维度：需与 distance_predictor.embedding_dim 对齐
     encoding_size: 256
+    # Transformer 配置
     transformer:
+      # 注意力头数
       num_heads: 4
+      # 层数
       num_layers: 4
+      # 前馈层维度因子
       ff_dim_factor: 4
+  # 扩散模型主干：ConditionalUnet1D 预测动作加噪后的 epsilon
   diffusion:
+    # UNet 类型
     name: conditional_unet1d
+    # 输入维度（动作维度）
     input_dim: 2
+    # 下采样通道数：控制 U-Net 多尺度通道宽度
     down_dims: [64, 128, 256]
+    # 是否预测条件缩放
     cond_predict_scale: false
+  # 扩散调度器：训练加噪和可视化采样共用
   diffusion_scheduler:
+    # 调度器名称
     name: ddpm
+    # 训练时间步数
     num_train_timesteps: 10
+    # beta 计划
     beta_schedule: squaredcos_cap_v2
+    # 是否裁剪采样
     clip_sample: true
+    # 预测类型（epsilon/v_prediction）
     prediction_type: epsilon
+  # 距离预测分支
   distance_predictor:
+    # 预测器名称
     name: distance_mlp
+    # 特征维度
     embedding_dim: 256
 
 objective:
+  # 目标函数注册名：NoMaD distance + denoising objective
   name: nomad_diffusion
+  # 目标图像遮蔽概率：训练时随机屏蔽目标图，学习无目标条件行为
   goal_mask_prob: 0.5
+  # 距离损失权重：扩散损失权重为 1-alpha
   alpha: 1e-4
+  # 距离掩码策略
   distance_mask_mode: per_sample
+  # 子损失配置
   losses:
+    # 扩散损失
     diffusion: mse
+    # 距离损失
     distance: mse
 
 optimizer:
+  # 优化器名称
   name: adamw
+  # 学习率
   lr: 1e-4
+  # 梯度裁剪配置
   gradient_clip:
+    # 是否启用裁剪
     enabled: false
+    # 最大范数
     max_norm: 1.0
 
 scheduler:
+  # 调度器名称
   name: cosine
+  # 总 epoch 数
   epochs: 100
+  # 初始学习率
   lr: 1e-4
+  # warmup 配置
   warmup:
+    # 是否启用 warmup
     enabled: true
+    # warmup epoch 数
     epochs: 2
+  # CyclicLR 周期长度
   cyclic_period: 10
+  # ReduceLROnPlateau 容忍 epoch 数
   plateau_patience: 3
+  # ReduceLROnPlateau 衰减系数
   plateau_factor: 0.5
 
 metrics:
+  # 重指标列表
   heavy:
     - name: nomad_behavior
 
 logging:
+  # 指标日志频率（步）
   metric_log_freq: 100
+  # 图像日志频率（步）
   image_log_freq: 3000
+  # 重指标日志频率（步）
   heavy_metric_log_freq: 1000
+  # 重指标开始步数
   heavy_metric_start_step: 1000
+  # 图像日志开始步数
   image_start_step: 3000
+  # 性能日志频率（步）
   perf_log_freq: 50
+  # 是否按 global_step 统计频率
   by_global_step: true
+  # 是否在第 0 步也记录
   first_step: false
+  # 移动平均窗口大小
   window_size: 100
+  # 日志 sink 列表
   sinks:
+    # 控制台输出
     - name: console
+    # Weights & Biases
     - name: wandb
+      # 是否启用 wandb
       enabled: true
+      # wandb 实体/组织
       entity: 1948627929-university-of-central-florida
 
 visualization:
+  # 每次可视化记录的图片数量
   num_images_log: 8
+  # 动作采样数量
   num_action_samples_log: 8
+  # 训练阶段可视化器
   train:
     - name: nomad_action_distribution
+  # 评估阶段可视化器
   eval:
     - name: nomad_action_distribution
 
 callbacks:
+  # 检查点保存回调
   - name: checkpoint
+    # 每个 epoch 保存 latest
     save_latest_every_epoch: true
+    # 周期性保存历史 checkpoint
     checkpoint_freq: 5
+  # 性能监控回调
   - name: perf_monitor

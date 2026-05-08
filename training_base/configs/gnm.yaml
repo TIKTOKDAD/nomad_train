@@ -1,44 +1,83 @@
+# ============================================================
+# GNM experiment config
+# ============================================================
+# 本文件覆盖 defaults.yaml 中与 GNM 相关的训练参数。
+# GNM 属于监督式航点预测：模型输出距离 + 未来航点，目标函数为 supervised_waypoint。
+
 algorithm:
+  # 算法注册名：对应 training_base.algorithms.gnm.GNMAlgorithm
   name: gnm
 
 runtime:
+  # 项目名称：决定日志目录 logs/<project_name>/<run_name>_timestamp
   project_name: vint-release
+  # 本次运行名称：CLI 会在后面追加时间戳，避免覆盖历史实验
   run_name: gnm
+  # 是否执行训练：false 时可配合特定入口做评估或调试
   train: true
+  # 训练 batch_size：单进程时为每步样本数；DDP 时可被 global_batch_size 覆盖
   batch_size: 400
+  # 评估 batch_size：只影响 test DataLoader
   eval_batch_size: 400
+  # 训练 epoch 数：调度器若未显式配置 epochs，也会使用该值
   epochs: 30
+  # GPU 列表：非 torchrun 启动时会写入 CUDA_VISIBLE_DEVICES
   gpu_ids: [0]
+  # DataLoader worker 数：用于训练集加载
   num_workers: 4
 
 data:
+  # 是否对动作做归一化：true 时动作坐标按 metric_waypoint_spacing * waypoint_spacing 缩放
   normalize: true
+  # 上下文采样类型：temporal 表示使用连续历史帧
   context_type: temporal
+  # 上下文帧数：最终 obs_image 通道数为 3*(context_size+1)
   context_size: 5
+  # 输入图像尺寸（宽, 高）：Dataset 会中心裁剪并 resize 到该尺寸
   image_size: [85, 64]
+  # 目标类型：当前数据集实现只支持 image
   goal_type: image
+  # 预测航点数量：action_label 形状中的 T
   len_traj_pred: 5
+  # 是否学习角度：true 时动作标签后两维为 cos/sin 朝向表示
   learn_angle: true
+  # 距离类别范围：控制目标采样和距离标签的离散桶范围
   distance:
+    # 最小距离类别（航点步）
     min_dist_cat: 0
+    # 最大距离类别（航点步）
     max_dist_cat: 20
+  # 动作类别范围：只有该范围内的正样本会参与动作损失
   action:
+    # 最小动作类别（航点步），太近样本不学习动作
     min_dist_cat: 2
+    # 最大动作类别（航点步），太远样本不学习动作
     max_dist_cat: 10
+  # 数据集配置：实际训练时需要填入每个数据集的 data_folder/train/test 等路径
   datasets: {}
 
 model:
+  # 模型注册名：对应 training_base.models.build_gnm
   name: gnm
+  # 观测编码维度：GNM obs_mobilenet 分支压缩后的向量维度
   obs_encoding_size: 1024
+  # 目标编码维度：GNM goal_mobilenet 分支压缩后的向量维度
   goal_encoding_size: 1024
 
 objective:
+  # 目标函数注册名：监督式距离 + 航点损失
   name: supervised_waypoint
+  # 距离/动作损失权重：total_loss = alpha*1e-2*dist_loss + (1-alpha)*action_loss
   alpha: 0.5
 
 optimizer:
+  # 优化器注册名：对应 torch.optim.Adam
   name: adam
+  # 学习率：传入 optimizer.lr
   lr: 7e-4
+  # 梯度裁剪配置：enabled=false 时不裁剪
   gradient_clip:
+    # 是否启用裁剪
     enabled: false
+    # 最大范数：mode 默认 norm 时使用
     max_norm: 1.0

@@ -1,3 +1,11 @@
+# ============================================================
+# Navigation data module - dataset/DataLoader/LMDB orchestration
+# ============================================================
+# 本文件负责把配置中的 datasets 字段落到真实数据管线：
+# 1. 为每个数据集 split 构建 NavigationDataset
+# 2. 在 DDP 前检查或强制只读 LMDB，避免多进程重复构建缓存
+# 3. 合并训练集、构建 train/test DataLoader，并写回可视化所需 dataset_metadata
+
 from copy import deepcopy
 from typing import Dict, Iterable
 
@@ -12,15 +20,19 @@ from training_base.data.batch import navigation_collate
 from training_base.data.navigation_dataset import NavigationDataset, check_lmdb_cache_ready
 
 
+# 根据配置生成所有数据集分割信息
 def configured_dataset_splits(config) -> Iterable[dict]:
+    # 这些字段决定索引文件名和 LMDB 完整性标记，必须与 NavigationDataset 初始化保持一致
     context_type = config["data"].get("context_type", "temporal")
     distance = config["data"]["distance"]
     for dataset_name, data_config in config["data"]["datasets"].items():
+        # 数据集级配置可以覆盖默认 waypoint_spacing/end_slack
         waypoint_spacing = data_config.get("waypoint_spacing", 1)
         end_slack = data_config.get("end_slack", 0)
         for split in ("train", "test"):
             if split not in data_config:
                 continue
+            # yield 一个扁平字典，便于缓存检查函数不关心原始 YAML 层级
             yield {
                 "dataset_name": dataset_name,
                 "split": split,
@@ -34,6 +46,7 @@ def configured_dataset_splits(config) -> Iterable[dict]:
             }
 
 
+# 将 LMDB 校验错误格式化为可读字符串
 def format_lmdb_cache_errors(errors) -> str:
     lines = []
     for item in errors:
@@ -43,9 +56,11 @@ def format_lmdb_cache_errors(errors) -> str:
     return "\n".join(lines)
 
 
+# 批量检查所有数据分割的 LMDB 缓存是否完整
 def check_lmdb_caches_ready(config):
     errors = []
     for split_config in configured_dataset_splits(config):
+        # check_lmdb_cache_ready 会同时检查索引 pkl、LMDB 目录和 complete.json 标记
         ready, problems = check_lmdb_cache_ready(
             data_split_folder=split_config["data_split_folder"],
             dataset_name=split_config["dataset_name"],
@@ -68,25 +83,31 @@ def check_lmdb_caches_ready(config):
     return errors
 
 
+# 汇总单个数据集的元信息（用于日志与可视化）
 def navigation_dataset_metadata(dataset: NavigationDataset) -> dict:
     data_config = dataset.data_config or {}
     return {
+        # name/dataset_name 两个字段都保留，兼容不同可视化器读取习惯
         "name": dataset.dataset_name,
         "dataset_name": dataset.dataset_name,
         "dataset_index": int(dataset.dataset_index),
+        # metric_scale = metric_waypoint_spacing * waypoint_spacing，用于把归一化轨迹还原成米
         "metric_waypoint_spacing": float(data_config.get("metric_waypoint_spacing", 1.0)),
         "waypoint_spacing": int(dataset.waypoint_spacing),
         "metric_scale": float(dataset.metric_scale),
+        # camera_metrics 只用于投影视觉化，不参与训练标签计算
         "camera_metrics": deepcopy(data_config.get("camera_metrics", {})),
     }
 
 
+# 分布式训练前要求 LMDB 缓存已就绪
 def require_lmdb_ready_before_ddp(config) -> None:
     runtime = config["runtime"]
     if not bool(runtime.get("require_lmdb_ready_for_ddp", True)):
         return
     errors = check_lmdb_caches_ready(config)
     if errors:
+        # DDP 下每个 rank 同时构建 LMDB 风险很高，因此要求先单进程 build-lmdb-only
         raise RuntimeError(
             "DDP training requires all LMDB caches to be prebuilt and complete.\n"
             "Run this first with a single process:\n"
@@ -97,11 +118,14 @@ def require_lmdb_ready_before_ddp(config) -> None:
         )
 
 
+# torchrun + DDP 场景下的前置检查
 def preflight_navigation_data(config) -> None:
+    # 只有 torchrun 分布式启动时才做强制 LMDB preflight；单卡/单进程允许 auto 构建
     if is_torchrun() and bool(config["runtime"].get("distributed", True)):
         require_lmdb_ready_before_ddp(config)
 
 
+# 仅构建 LMDB 缓存的快捷入口
 def handle_build_lmdb_only(config, context) -> bool:
     if not bool(config["runtime"].get("build_lmdb_only", False)):
         return False
@@ -110,12 +134,15 @@ def handle_build_lmdb_only(config, context) -> bool:
     return True
 
 
+# 数据模块：构建数据集与 DataLoader，并处理 LMDB 缓存策略
 class NavigationDataModule:
     """Build navigation datasets and DataLoaders with DDP-safe LMDB semantics."""
 
+    # 初始化数据模块并设置图像归一化变换
     def __init__(self, config, context: RuntimeContext) -> None:
         self.config = config
         self.context = context
+        # Dataset 返回 [0,1] 图像；训练前统一做 ImageNet normalize，匹配 EfficientNet/MobileNet 预训练分布
         self.transform = transforms.Compose(
             [
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -125,15 +152,19 @@ class NavigationDataModule:
         self.test_dataloaders: Dict[str, DataLoader] = {}
         self.train_sampler = None
 
+    # 决定 LMDB 缓存模式（build/read/auto）
     def _lmdb_cache_mode(self, build_lmdb_only: bool) -> str:
         runtime = self.config["runtime"]
         mode = str(runtime.get("lmdb_cache_mode", "auto")).lower()
         if build_lmdb_only:
+            # 命令行 --build-lmdb-only 明确要求只构建缓存，不进入训练
             return "build"
         if self.context.distributed and bool(runtime.get("require_lmdb_ready_for_ddp", True)):
+            # DDP 训练阶段只读缓存，避免多进程抢写同一个 LMDB
             return "read"
         return mode
 
+    # 构建训练与测试数据集，并记录元数据
     def _build_datasets(self, build_lmdb_only: bool):
         config = self.config
         data = config["data"]
@@ -145,21 +176,27 @@ class NavigationDataModule:
         distributed_eval = bool(runtime.get("distributed_eval", False))
         lmdb_cache_mode = self._lmdb_cache_mode(build_lmdb_only)
 
+        # 非主进程等待主进程完成缓存或准备
         if self.context.distributed and not self.context.is_main_process:
             barrier()
 
         for dataset_name, data_config in data["datasets"].items():
+            # 对缺省字段进行默认补齐
+            # 这里直接 setdefault 到 config 副本，后续日志打印能看到最终生效值
             data_config.setdefault("negative_mining", True)
             data_config.setdefault("goals_per_obs", 1)
             data_config.setdefault("end_slack", 0)
             data_config.setdefault("waypoint_spacing", 1)
 
             for split in ("train", "test"):
+                # 非主进程在非分布式评估时跳过测试集构建
                 if self.context.distributed and not self.context.is_main_process and split != "train" and not distributed_eval:
                     continue
                 if split not in data_config:
                     continue
 
+                # 构建单个数据集实例
+                # 传入的距离/action 配置分别控制目标采样距离桶和动作损失有效区间
                 dataset = NavigationDataset(
                     data_folder=data_config["data_folder"],
                     data_split_folder=data_config[split],
@@ -187,6 +224,7 @@ class NavigationDataModule:
                     rebuild_incomplete_lmdb=bool(runtime.get("rebuild_incomplete_lmdb", False)),
                 )
                 metadata = navigation_dataset_metadata(dataset)
+                # 按 dataset_index 和 dataset_name 各存一份，方便 batch 级查找或人工读日志
                 dataset_metadata[str(dataset.dataset_index)] = metadata
                 dataset_metadata_by_name[dataset.dataset_name] = metadata
                 if split == "train":
@@ -196,14 +234,17 @@ class NavigationDataModule:
 
         data["dataset_metadata"] = dataset_metadata
         data["dataset_metadata_by_name"] = dataset_metadata_by_name
+        # 主进程完成后唤醒其他进程
         if self.context.distributed and self.context.is_main_process:
             barrier()
         return train_dataset, test_datasets
 
+    # 初始化 DataLoader，支持仅构建缓存模式
     def setup(self, build_lmdb_only: bool = False) -> None:
         config = self.config
         runtime = config["runtime"]
         data = config["data"]
+        # 旧配置可能缺少这两个字段，在进入 Dataset 前补齐
         data.setdefault("context_type", "temporal")
         data.setdefault("clip_goals", False)
 
@@ -211,14 +252,18 @@ class NavigationDataModule:
         if build_lmdb_only:
             return
 
+        # 合并多个训练数据集为一个 ConcatDataset
         train_dataset = ConcatDataset(train_datasets)
+        # global_batch_size 若设置，代表跨所有 DDP rank 的总 batch；否则沿用 runtime.batch_size
         configured_global_batch_size = runtime.get("global_batch_size")
         global_batch_size = int(runtime["batch_size"] if configured_global_batch_size is None else configured_global_batch_size)
         runtime["global_batch_size"] = global_batch_size
         runtime["batch_size"] = global_batch_size
 
         train_batch_size = global_batch_size
+        # 分布式训练下使用 DistributedSampler 切分数据
         if self.context.distributed:
+            # 保持语义清晰：每个 rank 的 batch = global_batch_size / world_size
             if train_batch_size % self.context.world_size != 0:
                 raise ValueError(
                     f"Global batch_size={train_batch_size} must be divisible by "
@@ -234,12 +279,14 @@ class NavigationDataModule:
             )
         runtime["per_device_batch_size"] = train_batch_size
 
+        # DataLoader 性能参数集中从 runtime 读取，方便在 YAML 中统一调参
         pin_memory = bool(runtime.get("pin_memory", torch.cuda.is_available()))
         prefetch_factor = int(runtime.get("prefetch_factor", 2))
         train_num_workers = workers_per_rank(runtime, self.context.distributed, self.context.world_size, train=True)
         runtime["num_workers_per_rank"] = train_num_workers
         persistent_workers = bool(runtime.get("persistent_workers", train_num_workers > 0))
 
+        # 训练 DataLoader
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=train_batch_size,
@@ -253,6 +300,7 @@ class NavigationDataModule:
 
         runtime.setdefault("eval_batch_size", runtime["batch_size"])
         distributed_eval = bool(runtime.get("distributed_eval", False))
+        # 评估 worker 可以独立配置，避免测试阶段和训练阶段吞吐需求绑定
         test_num_workers = workers_per_rank(runtime, self.context.distributed and distributed_eval, self.context.world_size, train=False)
 
         if self.context.is_main_process:
@@ -267,8 +315,10 @@ class NavigationDataModule:
                 f"pin_memory={pin_memory}"
             )
 
+        # 构建测试集 DataLoader
         for dataset_type, dataset in test_datasets.items():
             if self.context.distributed and distributed_eval:
+                # 分布式评估时手动按 rank 切片；之后 MetricStore.reduce_distributed 聚合指标
                 dataset = Subset(dataset, list(range(self.context.rank, len(dataset), self.context.world_size)))
             self.test_dataloaders[dataset_type] = DataLoader(
                 dataset,

@@ -1,3 +1,11 @@
+# ============================================================
+# Metric store - sliding metrics and distributed aggregation
+# ============================================================
+# 本文件管理训练/评估指标的临时缓存：
+# 1. update 写入当前 step 的标量日志
+# 2. latest/average 为 Recorder 提供不同聚合视图
+# 3. reduce_distributed 在 DDP 评估时合并各 rank 的指标均值
+
 from collections import defaultdict
 from typing import Dict
 
@@ -6,31 +14,40 @@ import torch
 import torch.distributed as dist
 
 
+# 将张量/数值统一转换为 float
 def _to_float(value) -> float:
+    # 日志只保存 Python float，避免持有计算图或 GPU 张量
     if isinstance(value, torch.Tensor):
         return value.detach().float().item()
     return float(value)
 
 
+# 指标缓存：支持滑动窗口统计与分布式聚合
 class MetricStore:
+    # window_size 控制 display_latest 的移动平均窗口
     def __init__(self, window_size: int = 10) -> None:
         self.window_size = max(int(window_size), 1)
         self.data = defaultdict(list)
 
+    # 写入新日志值
     def update(self, logs: Dict[str, object]) -> None:
         for key, value in logs.items():
             if value is None:
                 continue
             number = _to_float(value)
+            # NaN 指标不进入窗口，避免 display/average 被污染
             if not np.isnan(number):
                 self.data[key].append(number)
 
+    # 获取最新值
     def latest(self, prefix: str = "") -> Dict[str, float]:
         return {f"{prefix}{key}": values[-1] for key, values in self.data.items() if values}
 
+    # 获取平均值
     def average(self, prefix: str = "") -> Dict[str, float]:
         return {f"{prefix}{key}": float(np.mean(values)) for key, values in self.data.items() if values}
 
+    # 格式化输出最新值与移动平均
     def display_latest(self) -> str:
         parts = []
         for key, values in self.data.items():
@@ -40,10 +57,12 @@ class MetricStore:
             parts.append(f"{key}: {values[-1]:.4f} ({self.window_size}pt moving_avg: {moving:.4f})")
         return " | ".join(parts)
 
+    # 分布式聚合（均值）
     def reduce_distributed(self, device) -> None:
         if not (dist.is_available() and dist.is_initialized()):
             return
         for key, values in self.data.items():
+            # 本地 sum/count -> all_reduce -> 全局平均，适合各 rank batch 数不同的评估
             local_sum = float(np.sum(values)) if values else 0.0
             local_count = float(len(values))
             payload = torch.tensor([local_sum, local_count], device=device, dtype=torch.float64)

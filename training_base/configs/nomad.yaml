@@ -1,77 +1,138 @@
+# ============================================================
+# NoMaD experiment config
+# ============================================================
+# 本文件覆盖 defaults.yaml 中与 NoMaD 相关的训练参数。
+# NoMaD 使用 masked_vint 视觉条件、ConditionalUnet1D 动作扩散模型和 distance_mlp 距离头。
+
 algorithm:
+  # 算法注册名：对应 training_base.algorithms.nomad.NoMaDAlgorithm
   name: nomad
+  # EMA 配置：评估/可视化优先使用滑动平均权重
   ema:
+    # 是否启用 EMA
     enabled: true
+    # EMA 衰减因子 power：值越大，平均模型变化越慢
     power: 0.75
 
 runtime:
+  # 项目名称：日志目录一级路径
   project_name: nomad
+  # 本次运行名称：CLI 会追加时间戳
   run_name: nomad
 
 data:
+  # 上下文帧数：masked_vint token 数 = context_size + 2
   context_size: 3
+  # 图像尺寸（宽, 高）：NoMaD 常用正方形输入
   image_size: [96, 96]
+  # 预测航点数量：扩散动作序列长度
   len_traj_pred: 8
+  # 是否学习角度：NoMaD 扩散动作只建模二维位移，因此为 false
   learn_angle: false
+  # 动作类别范围：只有该距离范围内的正样本参与扩散动作损失
   action:
+    # 最小动作类别（航点步）
     min_dist_cat: 3
+    # 最大动作类别（航点步）
     max_dist_cat: 20
 
 model:
+  # 模型注册名：对应 training_base.models.build_nomad
   name: nomad
+  # 视觉编码器配置：输出 diffusion/distance 共用的条件向量
   vision_encoder:
+    # 视觉编码器类型：masked_vint 支持 goal mask
     name: masked_vint
+    # 观测编码器骨干：EfficientNet 变体
     obs_encoder: efficientnet-b0
+    # 编码维度：也作为 diffusion global_cond_dim 的默认值
     encoding_size: 256
+    # Transformer 配置：控制时序/目标 token 融合
     transformer:
+      # 注意力头数
       num_heads: 4
+      # TransformerEncoder 层数
       num_layers: 4
+      # 前馈层维度因子：ff_dim = factor * encoding_size
       ff_dim_factor: 4
+  # 扩散模型主干：预测 noisy action 中的噪声 epsilon
   diffusion:
+    # U-Net 注册名：对应 ConditionalUnet1D
     name: conditional_unet1d
+    # 输入维度（动作维度）：NoMaD 使用二维增量动作 dx/dy
     input_dim: 2
+    # 下采样通道数：控制 U-Net 宽度和多尺度结构
     down_dims: [64, 128, 256]
+    # 是否预测条件缩放：保持 false 以匹配当前训练实现
     cond_predict_scale: false
+  # 扩散调度器：控制训练加噪和采样去噪时间表
   diffusion_scheduler:
+    # 调度器注册名
     name: ddpm
+    # 训练时间步数：越大采样更细但更慢
     num_train_timesteps: 10
+  # 距离预测分支：从视觉条件直接回归距离
   distance_predictor:
+    # 预测器注册名
     name: distance_mlp
+    # 特征维度：必须与 vision_encoder.encoding_size 对齐
     embedding_dim: 256
 
 objective:
+  # 目标函数注册名：NoMaD 扩散目标
   name: nomad_diffusion
+  # 目标图像遮蔽概率：训练时随机屏蔽目标图，增强无目标条件能力
   goal_mask_prob: 0.5
+  # 距离损失权重：total_loss = alpha*dist_loss + (1-alpha)*diffusion_loss
   alpha: 1e-4
+  # 距离掩码策略：per_sample 表示只对未屏蔽目标的样本计算距离损失
   distance_mask_mode: per_sample
+  # 子损失配置：可分别替换 diffusion/distance 损失
   losses:
+    # 扩散噪声预测损失
     diffusion: mse
+    # 距离回归损失
     distance: mse
 
 optimizer:
+  # 优化器名称
   name: adamw
+  # 学习率
   lr: 1e-4
 
 scheduler:
+  # 调度器名称
   name: cosine
+  # 总 epoch 数（供调度器使用）
   epochs: 100
+  # 初始学习率
   lr: 1e-4
+  # warmup 配置
   warmup:
+    # 是否启用 warmup
     enabled: true
+    # warmup epoch 数
     epochs: 2
 
 metrics:
+  # 重指标列表：会执行反向扩散采样，建议低频记录
   heavy:
     - name: nomad_behavior
 
 visualization:
+  # 训练阶段可视化器：绘制有目标/无目标采样动作分布
   train:
     - name: nomad_action_distribution
+  # 评估阶段可视化器
   eval:
     - name: nomad_action_distribution
 
 callbacks:
+  # 检查点保存回调
   - name: checkpoint
+    # 每个 epoch 保存 latest
     save_latest_every_epoch: true
+    # 周期性保存历史 checkpoint
     checkpoint_freq: 5
+  # 性能监控回调
   - name: perf_monitor
