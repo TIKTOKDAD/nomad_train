@@ -156,6 +156,7 @@ class Trainer:
                             epoch=epoch,
                             batch_idx=batch_idx,
                             num_batches=num_batches,
+                            global_step=self.global_step,
                             recorder=self.recorder,
                         )
 
@@ -264,6 +265,7 @@ class Trainer:
                     epoch=epoch,
                     batch_idx=max(num_batches - 1, 0),
                     num_batches=num_batches,
+                    global_step=self.global_step,
                     recorder=self.recorder,
                 )
 

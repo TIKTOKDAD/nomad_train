@@ -31,6 +31,7 @@ class SupervisedWaypointVisualizer:
         num_batches,
         normalized,
         project_folder,
+        global_step,
         num_images_log,
         obs_image,
         goal_image,
@@ -71,4 +72,4 @@ class SupervisedWaypointVisualizer:
             image_payload.append(recorder.image(path))
         if image_payload:
             # 图片日志统一进入 media 分区；eval 时 mode 是数据集名
-            recorder.log_images({media_key(mode, "navigation_prediction"): image_payload}, commit=False)
+            recorder.log_images({media_key(mode, "navigation_prediction"): image_payload}, step=global_step, commit=False)

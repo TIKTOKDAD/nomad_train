@@ -44,6 +44,7 @@ class NoMaDActionDistributionVisualizer:
         mode,
         project_folder,
         epoch,
+        global_step,
         num_images_log,
         num_action_samples_log,
         action_stats=None,
@@ -111,4 +112,4 @@ class NoMaDActionDistributionVisualizer:
             image_payload.append(recorder.image(path))
         if image_payload:
             # 图片日志统一进入 media 分区；eval 时 mode 是数据集名
-            recorder.log_images({media_key(mode, "action_samples"): image_payload}, commit=False)
+            recorder.log_images({media_key(mode, "action_samples"): image_payload}, step=global_step, commit=False)

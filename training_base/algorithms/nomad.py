@@ -234,7 +234,7 @@ class NoMaDAlgorithm(Algorithm):
         return logs
 
     # 可视化输出（动作分布、轨迹等）
-    def visualize(self, *, model, prepared, result, state: NoMaDState, config, mode, project_folder, epoch, batch_idx, num_batches, recorder) -> None:
+    def visualize(self, *, model, prepared, result, state: NoMaDState, config, mode, project_folder, epoch, batch_idx, num_batches, global_step, recorder) -> None:
         # 图像日志未触发时不生成 Matplotlib 文件，避免训练热路径额外开销
         if prepared["viz_obs"] is None or prepared["viz_goal"] is None:
             return
@@ -259,6 +259,7 @@ class NoMaDAlgorithm(Algorithm):
                 mode=mode,
                 project_folder=project_folder,
                 epoch=epoch,
+                global_step=global_step,
                 num_images_log=int(visualizer_config.get("num_images_log", config["visualization"].get("num_images_log", 8))),
                 num_action_samples_log=int(
                     visualizer_config.get("num_action_samples_log", config["visualization"].get("num_action_samples_log", 30))

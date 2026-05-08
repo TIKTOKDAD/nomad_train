@@ -134,7 +134,7 @@ class SupervisedWaypointAlgorithm(Algorithm):
         return logs
 
     # 可视化预测与目标轨迹
-    def visualize(self, *, model, prepared, result, state, config, mode, project_folder, epoch, batch_idx, num_batches, recorder) -> None:
+    def visualize(self, *, model, prepared, result, state, config, mode, project_folder, epoch, batch_idx, num_batches, global_step, recorder) -> None:
         # 没有开启图像日志时 prepared 中的 viz 图像为 None，直接跳过
         if prepared["viz_obs_image"] is None or prepared["viz_goal_image"] is None:
             return
@@ -150,6 +150,7 @@ class SupervisedWaypointAlgorithm(Algorithm):
                 num_batches=num_batches,
                 normalized=bool(config["data"]["normalize"]),
                 project_folder=project_folder,
+                global_step=global_step,
                 num_images_log=int(visualizer_config.get("num_images_log", config["visualization"].get("num_images_log", 8))),
                 obs_image=prepared["viz_obs_image"],
                 goal_image=prepared["viz_goal_image"],
