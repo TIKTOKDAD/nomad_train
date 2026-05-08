@@ -13,6 +13,7 @@ import tqdm
 
 from training_base.callbacks import CallbackManager
 from training_base.loggers import Recorder
+from training_base.loggers.key_format import format_metric_logs
 from training_base.core.native_utils import (
     autocast,
     distributed_barrier,
@@ -116,7 +117,12 @@ class Trainer:
                     if show_tqdm and result.loss is not None:
                         iterator.set_postfix(loss=float(result.loss.detach().float().item()))
                     self._print_store(metric_store, "train", epoch, batch_idx, num_batches)
-                    self.recorder.log_metrics(metric_store.latest(prefix="train/"), step=self.global_step, commit=True)
+                    # 轻量指标只做命名格式化，不触发额外前向/采样/画图
+                    self.recorder.log_metrics(
+                        format_metric_logs(metric_store.latest(), "train"),
+                        step=self.global_step,
+                        commit=True,
+                    )
 
                 # 重计算指标日志（推理模式）
                 # NoMaD 行为指标等会执行反向扩散采样，因此用独立频率 heavy_freq 控制
@@ -127,7 +133,12 @@ class Trainer:
                     if metric_logs:
                         heavy_store.update(metric_logs)
                         self._print_store(heavy_store, "train_heavy", epoch, batch_idx, num_batches)
-                        self.recorder.log_metrics(heavy_store.latest(prefix="train/"), step=self.global_step, commit=True)
+                        # 重指标单独走 behavior 命名空间，和普通 loss/action 曲线分离
+                        self.recorder.log_metrics(
+                            format_metric_logs(heavy_store.latest(), "train", kind="behavior"),
+                            step=self.global_step,
+                            commit=True,
+                        )
 
                 # 可视化输出（如轨迹、动作分布等）
                 # 可视化统一使用 eval/EMA 模型，避免 dropout/BN 训练状态影响图像解释
@@ -156,7 +167,7 @@ class Trainer:
                     self.callbacks.call(
                         "log_perf",
                         recorder=self.recorder,
-                        mode=f"{self.algorithm.name}_train",
+                        mode="train",
                         epoch=epoch,
                         batch_idx=batch_idx,
                         batch_size=result.batch_size or 0,
@@ -176,6 +187,7 @@ class Trainer:
         logging = config["logging"]
         heavy_freq = int(logging.get("heavy_metric_log_freq", logging.get("metric_log_freq", 0)))
         heavy_start = int(logging.get("heavy_metric_start_step", 0))
+        eval_heavy_every_eval = bool(logging.get("eval_heavy_every_eval", True))
         log_by_global_step = bool(logging.get("by_global_step", True))
         log_first_step = bool(logging.get("first_step", False))
         dataloader_len = len(dataloader)
@@ -208,7 +220,19 @@ class Trainer:
                 metric_logs = dict(result.logs)
                 metric_logs.update(self.algorithm.light_metrics(eval_model, prepared, result, state, config, mode=eval_type))
                 metric_store.update(metric_logs)
-                if should_log_event(heavy_freq, epoch, num_batches, batch_idx, log_by_global_step, heavy_start, log_first_step):
+                should_heavy = should_log_event(
+                    heavy_freq,
+                    epoch,
+                    num_batches,
+                    batch_idx,
+                    log_by_global_step,
+                    heavy_start,
+                    log_first_step,
+                )
+                if eval_heavy_every_eval and batch_idx == num_batches - 1:
+                    # 评估阶段保证每个数据集至少有一次 behavior 曲线，避免频率未对齐导致面板缺失
+                    should_heavy = True
+                if should_heavy:
                     heavy_logs = self.algorithm.heavy_metrics(eval_model, prepared, state, config, mode=eval_type)
                     if heavy_logs:
                         heavy_store.update(heavy_logs)
@@ -222,8 +246,9 @@ class Trainer:
 
         # 仅主进程记录评估日志与可视化
         if self.context.is_main_process and num_batches > 0:
-            data_log = metric_store.average(prefix=f"{eval_type}/")
-            data_log.update(heavy_store.average(prefix=f"{eval_type}/"))
+            # eval_type 是数据集名，如 huron_test；格式化后进入 eval/{dataset}/...
+            data_log = format_metric_logs(metric_store.average(), eval_type)
+            data_log.update(format_metric_logs(heavy_store.average(), eval_type, kind="behavior"))
             if data_log:
                 self.recorder.log_metrics(data_log, step=self.global_step, commit=False)
 
@@ -251,6 +276,8 @@ class Trainer:
         # setup 会构建 Dataset/DataLoader，并把 dataset_metadata 写回 config["data"]
         self.datamodule.setup(build_lmdb_only=False)
         runtime = self.config["runtime"]
+        # system/runtime 静态配置交给性能回调记录，Trainer 只负责触发生命周期 hook
+        self.callbacks.call("log_runtime_config", recorder=self.recorder, config=self.config, global_step=self.global_step)
 
         # 构建模型、损失目标与优化器/调度器
         model, model_extras = self.algorithm.build_model(self.config)
@@ -322,7 +349,8 @@ class Trainer:
 
                 # 记录当前学习率
                 if self.context.is_main_process:
-                    self.recorder.log_metrics({"lr": optimizer.param_groups[0]["lr"]}, step=self.global_step, commit=False)
+                    # 学习率属于优化器/运行时状态，放在 runtime/optim 分区
+                    self.recorder.log_metrics({"runtime/optim/lr": optimizer.param_groups[0]["lr"]}, step=self.global_step, commit=False)
 
                 # 回调：epoch 结束
                 self.callbacks.call(

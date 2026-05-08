@@ -1,0 +1,148 @@
+# ============================================================
+# ViNT Late Fusion 配置文件
+# ============================================================
+# Late Fusion（后期融合）是ViNT的一个架构变体
+# 与标准ViNT的区别：
+# - 标准ViNT：将当前观测和目标图像拼接后输入编码器（早期融合）
+# - Late Fusion：分别编码观测和目标，在特征层面融合（后期融合）
+
+# ========== 项目基本信息 ==========
+project_name: vint-release      # 项目名称
+run_name: vint-late-fusion      # 运行名称，标识这是后期融合版本
+
+# ========== 训练基本设置 ==========
+use_wandb: True     # 使用Weights & Biases进行实验跟踪
+train: True         # 训练模式
+batch_size: 256     # 批次大小（比GNM的400小，因为模型更复杂）
+epochs: 100         # 训练轮次（比GNM的30多，需要更长时间收敛）
+gpu_ids: [0]        # 使用的GPU ID
+num_workers: 12     # 数据加载工作进程数（比默认的4多，加速数据加载）
+lr: 5e-4            # 学习率 0.0005
+optimizer: adamw    # AdamW优化器（带权重衰减，比Adam更好的泛化性能）
+clipping: False     # 不使用梯度裁剪
+max_norm: 1.        # 梯度裁剪的最大范数（虽然clipping=False，但保留参数）
+scheduler: "cosine" # 余弦退火学习率调度器
+warmup: False       # 不使用学习率预热（与标准ViNT不同）
+warmup_epochs: 4    # 预热轮次（未启用）
+cyclic_period: 10   # 循环学习率周期（未使用）
+plateau_patience: 3 # 平台调度器的耐心值（未使用）
+plateau_factor: 0.5 # 平台调度器的衰减因子（未使用）
+seed: 0             # 随机种子
+
+# ========== 模型架构参数 ==========
+model_type: vint    # 模型类型：ViNT
+obs_encoder: "efficientnet-b0"  # 观测编码器：EfficientNet-B0（按当前模型代码实例化）
+obs_encoding_size: 512          # 观测编码维度（比GNM的1024小，更轻量）
+mha_num_attention_heads: 4      # 多头注意力的头数
+mha_num_attention_layers: 4     # 注意力层数
+mha_ff_dim_factor: 4            # 前馈网络维度因子（ff_dim = embed_dim * factor）
+late_fusion: True               # 【关键】启用后期融合架构
+                                # True: 观测和目标分别编码，特征层融合
+                                # False: 观测和目标拼接后编码（标准ViNT）
+
+# ========== 动作空间归一化 ==========
+normalize: True     # 归一化动作空间
+
+# ========== 上下文配置 ==========
+context_type: temporal  # 时序上下文
+context_size: 0         # 【关键】上下文大小为0
+                        # 这意味着不使用历史观测，仅使用当前帧
+                        # 与标准ViNT的context_size=5不同
+                        # 后期融合架构可能不需要时序上下文
+
+# ========== 损失函数权重 ==========
+alpha: 0.5          # 距离损失和动作损失的权衡系数
+
+# ========== 距离分类边界 ==========
+distance:
+  min_dist_cat: 0   # 距离预测最小类别
+  max_dist_cat: 20  # 距离预测最大类别
+action:
+  min_dist_cat: 0   # 动作预测最小距离（0而非2，与GNM不同）
+  max_dist_cat: 10  # 动作预测最大距离
+close_far_threshold: 10  # 近远距离分界阈值
+
+# ========== 动作输出参数 ==========
+len_traj_pred: 5    # 预测轨迹长度（5个航点）
+learn_angle: True   # 学习航向角
+
+# ========== 数据集特定参数 ==========
+image_size: [85, 64]  # 图像尺寸 [宽, 高]
+goal_type: "image"    # 目标类型：图像
+
+# ========== 数据集配置 ==========
+# 使用多个公开数据集进行训练，实现跨机器人泛化
+datasets:
+  # RECON数据集：室内机器人导航数据
+  recon:
+    data_folder: /home/<username>/vint_dataset/recon
+    train: /home/<username>/data_splits/recon/train/  # 训练集划分文件路径
+    test: /home/<username>/data_splits/recon/test/    # 测试集划分文件路径
+    end_slack: 3        # 轨迹末端裁剪帧数（因为很多轨迹以碰撞结束）
+    goals_per_obs: 1    # 每个观测采样的目标数量
+    negative_mining: True  # 负样本相关配置项（具体采样行为以ViNT_Dataset实现为准）
+  
+  # GoStanford数据集：斯坦福校园导航数据
+  go_stanford:
+    data_folder: /home/<username>/vint_dataset/go_stanford_cropped
+    train: /home/<username>/data_splits/go_stanford/train/
+    test: /home/<username>/data_splits/go_stanford/test/
+    end_slack: 0        # 不裁剪末端（轨迹质量好）
+    goals_per_obs: 2    # 增加数据集大小（每个观测采样2个目标）
+    negative_mining: True
+  
+  # Cory Hall数据集：室内走廊导航数据
+  cory_hall:
+    data_folder: /home/<username>/vint_dataset/cory_hall/
+    train: /home/<username>/data_splits/cory_hall/train/
+    test: /home/<username>/data_splits/cory_hall/test/
+    end_slack: 3        # 裁剪末端碰撞帧
+    goals_per_obs: 1
+    negative_mining: True
+  
+  # TartanDrive数据集：越野地形导航数据
+  tartan_drive:
+    data_folder: /home/<username>/vint_dataset/tartan_drive/
+    train: /home/<username>/data_splits/tartan_drive/train/
+    test: /home/<username>/data_splits/tartan_drive/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  
+  # SACSoN数据集：多样化室内外导航数据
+  sacson:
+    data_folder: /home/<username>/vint_dataset/sacson/
+    train: /home/<username>/data_splits/sacson/train/
+    test: /home/<username>/data_splits/sacson/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+
+  # ========== 私有数据集（如有访问权限可取消注释） ==========
+  # Seattle数据集：西雅图城市导航数据
+  # seattle:
+  #   data_folder: /home/<username>/vint_dataset/seattle/
+  #   train: /home/<username>/data_splits/seattle/train/
+  #   test: /home/<username>/data_splits/seattle/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  
+  # SCAND数据集：大规模校园导航数据
+  # scand:
+  #   data_folder: /home/<username>/vint_dataset/scand/
+  #   train: /home/<username>/data_splits/scand/train/
+  #   test: /home/<username>/data_splits/scand/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+
+# ========== 日志记录配置 ==========
+# 设置为0会关闭相应的日志记录
+print_log_freq: 100      # 打印日志频率（每N次迭代）
+image_log_freq: 1000     # 图像日志频率（每N次迭代）
+num_images_log: 8        # 每次记录的图像数量
+pairwise_test_freq: 0    # 成对测试频率（0表示关闭）
+eval_fraction: 0.25      # 评估数据比例（使用25%的数据）
+wandb_log_freq: 10       # wandb记录频率（每N次迭代）
+eval_freq: 1             # 评估频率（每个epoch评估一次）

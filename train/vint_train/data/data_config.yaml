@@ -1,0 +1,181 @@
+# ============================================================
+# 数据配置文件
+# ============================================================
+# 本文件定义了ViNT项目中所有数据集的配置参数
+# 
+# 主要内容：
+# 1. 全局参数 - 扩散模型的动作统计信息
+# 2. 数据集特定参数 - 每个数据集的路径点间距和相机参数
+#
+# 使用场景：
+# - 训练时归一化动作数据
+# - 推理时反归一化动作输出
+# - 可视化时进行相机投影
+# - 不同数据集的特定配置
+#
+# 关键概念：
+# - metric_waypoint_spacing: 路径点之间的平均物理距离（米）
+# - action_stats: 用于将动作归一化到[-1, 1]范围
+# - camera_metrics: 相机内参和畸变系数（用于可视化）
+
+# ========== 全局参数：扩散模型动作统计 ==========
+# 这些统计信息用于NoMaD扩散模型的动作归一化
+
+action_stats:
+  # 动作的最小值 [min_dx, min_dy]
+  # dx: x方向的位移增量（米），正值表示前进
+  # dy: y方向的位移增量（米），正值表示左移
+  min: [-2.5, -4]
+  
+  # 动作的最大值 [max_dx, max_dy]
+  max: [5, 4]
+  
+  # 说明：
+  # - 这些值是从所有训练数据中统计得出的
+  # - 用于将动作归一化到[-1, 1]范围：
+  #   normalized = (action - min) / (max - min) * 2 - 1
+  # - 归一化有助于扩散模型的训练稳定性
+  # - 推理时需要反归一化：
+  #   action = (normalized + 1) / 2 * (max - min) + min
+
+# ========== 数据集特定参数 ==========
+# 每个数据集都有自己的配置，主要是路径点间距和可选的相机参数
+
+# ---------- recon 数据集 ----------
+recon:
+  # 路径点之间的平均物理间距（米）
+  # 用途：
+  # - 将归一化的预测转换为真实物理距离
+  # - 控制导航的精细程度
+  # - 影响子目标的选择距离
+  metric_waypoint_spacing: 0.25
+  
+  # 相机参数（可选，仅用于可视化）
+  # 参考：https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
+  camera_metrics:
+    # 相机离地面的高度（米）
+    camera_height: 0.95
+    
+    # 相机相对于机器人中心的x轴偏移（米）
+    # 正值表示相机在机器人前方
+    camera_x_offset: 0.45
+    
+    # 相机内参矩阵参数
+    # 用于将3D点投影到2D图像平面
+    camera_matrix:
+      fx: 272.547000  # x方向焦距（像素）
+      fy: 266.358000  # y方向焦距（像素）
+      cx: 320.000000  # 主点x坐标（像素）
+      cy: 220.000000  # 主点y坐标（像素）
+    
+    # 畸变系数
+    # 用于校正镜头畸变
+    dist_coeffs:
+      k1: -0.038483  # 径向畸变系数1
+      k2: -0.010456  # 径向畸变系数2
+      p1: 0.003930   # 切向畸变系数1
+      p2: -0.001007  # 切向畸变系数2
+      k3: 0.0        # 径向畸变系数3
+
+# ---------- scand 数据集 ----------
+scand:
+  # Stanford Campus Navigation Dataset
+  # 较大的间距，适合室外大范围导航
+  metric_waypoint_spacing: 0.38
+
+# ---------- tartan_drive 数据集 ----------
+tartan_drive:
+  # TartanDrive数据集
+  # 更大的间距，适合高速或大范围导航
+  metric_waypoint_spacing: 0.72
+
+# ---------- go_stanford 数据集 ----------
+go_stanford:
+  # GO Stanford数据集
+  # 非常小的间距，适合精细控制和室内导航
+  metric_waypoint_spacing: 0.12
+
+# ========== 私有数据集 ==========
+# 这些是特定机器人或环境的数据集
+
+# ---------- cory_hall 数据集 ----------
+cory_hall:
+  # Cory Hall室内数据集
+  # 极小的间距，适合狭窄空间和精确导航
+  metric_waypoint_spacing: 0.06
+
+# ---------- seattle 数据集 ----------
+seattle:
+  # Seattle室外数据集
+  # 中等间距，适合城市环境导航
+  metric_waypoint_spacing: 0.35
+
+# ---------- racer 数据集 ----------
+racer:
+  # RACER数据集
+  # 中等间距
+  metric_waypoint_spacing: 0.38
+
+# ---------- CARLA仿真数据集 ----------
+# CARLA是一个开源的自动驾驶仿真器
+
+carla_intvns:
+  # CARLA Interventions数据集
+  # 大间距，适合高速驾驶场景
+  metric_waypoint_spacing: 1.39
+
+carla_cil:
+  # CARLA Conditional Imitation Learning数据集
+  # 大间距，适合高速驾驶
+  metric_waypoint_spacing: 1.27
+
+carla:
+  # CARLA通用数据集
+  # 最大间距，适合高速公路场景
+  metric_waypoint_spacing: 1.59
+  
+  # 自定义图像路径函数（可选）
+  # 用于处理特殊的文件组织结构
+  image_path_func: get_image_path
+
+# ---------- sacson 数据集 ----------
+sacson:
+  # SACSON数据集
+  # 中小间距
+  metric_waypoint_spacing: 0.255
+
+# ========== 添加自定义数据集 ==========
+# 在这里添加你自己的数据集配置
+#
+# 模板：
+locobot_new:
+   metric_waypoint_spacing: 0.13  # 根据你的机器人和环境调整
+#   
+#   # 可选：如果需要可视化，添加相机参数
+#   camera_metrics:
+#     camera_height: 1.0
+#     camera_x_offset: 0.5
+#     camera_matrix:
+#       fx: 300.0
+#       fy: 300.0
+#       cx: 320.0
+#       cy: 240.0
+#     dist_coeffs:
+#       k1: 0.0
+#       k2: 0.0
+#       p1: 0.0
+#       p2: 0.0
+#       k3: 0.0
+#
+# 选择metric_waypoint_spacing的建议：
+# - 室内精细导航：0.05 - 0.15米
+# - 室内一般导航：0.15 - 0.30米
+# - 室外慢速导航：0.30 - 0.50米
+# - 室外快速导航：0.50 - 1.00米
+# - 高速驾驶：1.00 - 2.00米
+#
+# 考虑因素：
+# - 机器人的最大速度
+# - 环境的复杂程度
+# - 控制频率
+# - 传感器的更新频率

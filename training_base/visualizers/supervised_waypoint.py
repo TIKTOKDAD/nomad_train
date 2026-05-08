@@ -8,6 +8,7 @@
 
 import os
 
+from training_base.loggers.key_format import media_key
 from training_base.visualizers.trajectory import save_navigation_plot
 from training_base.registry import visualizer_registry
 
@@ -69,4 +70,5 @@ class SupervisedWaypointVisualizer:
             )
             image_payload.append(recorder.image(path))
         if image_payload:
-            recorder.log_images({f"{mode}/waypoint_prediction": image_payload}, commit=False)
+            # 图片日志统一进入 media 分区；eval 时 mode 是数据集名
+            recorder.log_images({media_key(mode, "navigation_prediction"): image_payload}, commit=False)

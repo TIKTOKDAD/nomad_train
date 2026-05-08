@@ -1,0 +1,79 @@
+# ============================================================
+# 视觉导航Transformer (ViNT) 训练默认配置文件
+# ============================================================
+# 本配置文件包含训练GNM、ViNT、NoMaD模型的默认参数
+# 用户配置文件会覆盖这些默认值
+
+# ========== 项目基本信息 ==========
+project_name: vint  # 项目名称，用于wandb实验跟踪和日志组织
+run_name: vint      # 运行名称，会自动添加时间戳后缀
+
+# ========== 训练基本设置 ==========
+use_wandb: True     # 是否使用Weights & Biases进行实验跟踪和可视化
+train: True         # 是否训练模型（False则仅评估）
+batch_size: 400     # 训练批次大小，根据GPU内存调整
+eval_batch_size: 400  # 评估批次大小
+epochs: 30          # 训练总轮次
+gpu_ids: [0]        # 使用的GPU ID列表，支持多GPU训练
+num_workers: 4      # 数据加载的并行工作进程数
+lr: 5e-4            # 学习率（0.0005）
+optimizer: adam     # 优化器类型：adam, adamw, sgd
+seed: 0             # 随机种子，用于结果可复现
+clipping: False     # 是否启用梯度裁剪
+train_subset: 1.    # 使用训练集的比例（1.0表示使用全部数据）
+
+# ========== 模型架构参数 ==========
+model_type: gnm     # 模型类型：gnm（General Navigation Model）、vint（Visual Navigation Transformer）、nomad（扩散策略模型）
+obs_encoding_size: 1024   # 观测图像的编码维度
+goal_encoding_size: 1024  # 目标图像的编码维度
+
+# ========== 动作空间归一化 ==========
+normalize: True     # 是否归一化动作空间（将动作值标准化到[-1, 1]范围）
+
+# ========== 上下文配置 ==========
+# 上下文是指模型输入的历史观测序列
+context_type: temporal  # 上下文类型：temporal（时序上下文）或randomized（随机采样）
+context_size: 5         # 上下文大小，即输入的历史观测帧数
+
+# ========== 损失函数权重 ==========
+alpha: 0.5          # 距离预测损失和动作预测损失之间的权衡系数（0-1之间）
+                    # total_loss = alpha * 1e-2 * distance_loss + (1-alpha) * action_loss
+beta: 0.1           # 任务损失和KL散度之间的权衡系数（用于变分模型）
+
+# ========== 输入输出类型 ==========
+obs_type: image     # 观测类型：image（图像）
+goal_type: image    # 目标类型：image（目标图像）
+scheduler: null     # 学习率调度器：null（不使用）、cosine（余弦退火）、cyclic（循环）、plateau（平台）
+
+# ========== 距离分类边界 ==========
+# 用于定义目标采样和动作预测的距离范围（单位：航点数，非米）
+# 实际物理距离 = 航点数 × waypoint_spacing × metric_waypoint_spacing
+distance:
+  min_dist_cat: 0   # 目标采样的最小距离（航点数），构建距离类别的下界
+  max_dist_cat: 20  # 目标采样的最大距离（航点数），构建距离类别的上界
+action:
+  min_dist_cat: 2   # 动作预测生效的最小距离阈值（航点数）- 距离 > 此值才计算动作损失
+  max_dist_cat: 10  # 动作预测生效的最大距离阈值（航点数）- 距离 < 此值才计算动作损失
+close_far_threshold: 10  # 近/远目标的分界阈值（航点数）
+                         # 用于区分采样的子目标是近目标还是远目标
+
+# ========== 动作输出参数 ==========
+len_traj_pred: 5    # 预测的轨迹长度（航点数量）
+                    # 模型会预测未来5个航点的位置
+learn_angle: True   # 是否学习和预测航向角（yaw angle）
+                    # True：预测(x, y, yaw)，False：仅预测(x, y)
+
+# ========== 数据集特定参数 ==========
+image_size: [85, 64]  # 输入图像尺寸 [宽度, 高度]（像素）
+                      # 图像会被调整到此尺寸后输入模型
+
+# ========== 日志记录配置 ==========
+# 注意：设置为0会关闭相应的日志记录
+print_log_freq: 100      # 打印训练日志的频率（每N次迭代）
+image_log_freq: 1000     # 记录图像到wandb的频率（每N次迭代）
+num_images_log: 8        # 每次记录时保存的图像数量
+pairwise_test_freq: 10   # 成对测试的频率（每N个epoch）
+eval_fraction: 0.25      # 用于评估的数据集比例（0.25表示使用25%的数据）
+wandb_log_freq: 10       # 记录指标到wandb的频率（每N次迭代）
+eval_freq: 1             # 模型评估的频率（每N个epoch进行一次完整评估）
+

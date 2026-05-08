@@ -1,0 +1,159 @@
+# ========== 项目配置 ==========
+project_name: vint-release  # 项目名称，用于组织实验日志和检查点
+run_name: vint-5c  # 运行名称，会自动添加时间戳后缀以避免重名
+
+# ========== 训练基础设置 ==========
+use_wandb: True  # 是否使用Weights & Biases进行实验跟踪和可视化，设为False则不记录到wandb
+train: True  # 是否训练模型，设为False则仅进行评估
+batch_size: 256  # 训练批次大小，每次迭代处理的样本数量（根据GPU显存调整）
+epochs: 100  # 训练总轮次数，完整遍历训练集的次数
+gpu_ids: [0]  # 使用的GPU设备ID列表，支持多GPU训练（如[0,1,2,3]）
+num_workers: 12  # 数据加载的工作进程数，增加可提升数据加载速度（建议设为CPU核心数）
+lr: 5e-4  # 初始学习率（0.0005），控制参数更新的步长
+
+# ========== 优化器配置 ==========
+optimizer: adamw  # 优化器类型：adamw（带权重衰减的Adam）、adam或sgd
+clipping: False  # 是否启用梯度裁剪，用于防止梯度爆炸
+max_norm: 1.  # 梯度裁剪的最大范数，仅在clipping=True时生效
+
+# ========== 学习率调度器配置 ==========
+scheduler: "cosine"  # 学习率调度策略：cosine（余弦退火）、cyclic（循环）、plateau（平台）或None
+warmup: True  # 是否使用学习率预热，训练初期逐渐增加学习率以稳定训练
+warmup_epochs: 4  # 预热的轮次数，在此期间学习率从0逐渐增加到初始lr
+cyclic_period: 10  # 循环学习率的周期（仅当scheduler="cyclic"时使用）
+plateau_patience: 3  # 平台调度器的耐心值，指标停止改善多少个epoch后降低学习率（仅当scheduler="plateau"时使用）
+plateau_factor: 0.5  # 平台调度器的学习率衰减因子（仅当scheduler="plateau"时使用）
+
+# ========== 随机种子 ==========
+seed: 0  # 随机种子，用于确保实验可复现性
+
+# ========== 模型架构参数 ==========
+model_type: vint  # 模型类型：vint（Visual Navigation Transformer）、gnm（General Navigation Model）或nomad
+obs_encoder: "efficientnet-b0"  # 观测图像编码器：efficientnet-b0/b1/b2等（按当前模型代码实例化）
+obs_encoding_size: 512  # 观测编码的特征维度，编码器输出会被压缩到此维度
+mha_num_attention_heads: 4  # 多头注意力机制的头数，用于Transformer中的自注意力层
+mha_num_attention_layers: 4  # Transformer中多头注意力层的数量，控制模型深度
+mha_ff_dim_factor: 4  # 前馈网络的维度扩展因子，前馈层维度 = obs_encoding_size * mha_ff_dim_factor
+late_fusion: False  # 是否使用后期融合策略：False表示将观测和目标图像拼接后编码，True表示分别编码后融合
+
+# ========== 动作空间归一化 ==========
+normalize: True  # 是否对动作空间进行归一化，归一化后的动作更适合跨机器人泛化
+
+# ========== 上下文配置 ==========
+context_type: temporal  # 上下文类型：temporal（时序上下文，使用历史观测帧）
+context_size: 5  # 上下文大小，使用过去多少帧观测作为输入（包含当前帧）
+
+# ========== 损失函数权重 ==========
+alpha: 0.5  # 距离损失和动作损失之间的权衡系数（0-1之间）
+            # 总损失 = alpha * 1e-2 * 距离损失 + (1-alpha) * 动作损失
+
+# ========== 距离分类边界 ==========
+# 用于定义目标采样和动作预测的距离范围（单位：航点数，非米）
+# 实际物理距离 = 航点数 × waypoint_spacing × metric_waypoint_spacing
+distance:
+  min_dist_cat: 0   # 目标采样的最小距离（航点数），构建距离类别的下界
+  max_dist_cat: 20  # 目标采样的最大距离（航点数），构建距离类别的上界
+action:
+  min_dist_cat: 0   # 动作预测生效的最小距离阈值（航点数）- 距离 > 此值才计算动作损失
+  max_dist_cat: 10  # 动作预测生效的最大距离阈值（航点数）- 距离 < 此值才计算动作损失
+close_far_threshold: 10  # 近/远目标的分界阈值（航点数）
+                         # 用于区分采样的子目标是近目标还是远目标
+
+# ========== 动作输出参数 ==========
+len_traj_pred: 5  # 预测的轨迹长度，即预测未来多少个航点（waypoints）
+learn_angle: True  # 是否预测机器人的朝向角（yaw），True表示预测(x, y, yaw)，False表示仅预测(x, y)
+
+# ========== 数据集通用参数 ==========
+image_size: [85, 64]  # 输入图像尺寸 [宽度, 高度]，所有图像会被调整到此尺寸
+goal_type: "image"  # 目标表示类型：image（使用目标图像）或其他表示方式
+
+# ========== 数据集配置 ==========
+# 每个数据集需要指定数据文件夹、训练/测试划分文件、以及数据集特定的参数
+datasets:
+  # RECON数据集：室内机器人导航数据集
+  recon:
+    data_folder: /home/<username>/vint_dataset/recon  # 数据集根目录，包含所有轨迹文件夹
+    train: /home/<username>/data_splits/recon/train/  # 训练集划分文件路径，包含traj_names.txt
+    test: /home/<username>/data_splits/recon/test/    # 测试集划分文件路径，包含traj_names.txt
+    end_slack: 3  # 从每条轨迹末尾截断的帧数，用于避免轨迹以碰撞结束的情况
+    goals_per_obs: 1  # 每个观测采样的目标数量，增加此值可扩充数据集规模
+    negative_mining: True  # 负样本相关配置项（具体采样行为以ViNT_Dataset实现为准）
+  
+  # Go Stanford数据集：斯坦福校园室外导航数据集（裁剪版）
+  go_stanford:
+    data_folder: /home/<username>/vint_dataset/go_stanford_cropped
+    train: /home/<username>/data_splits/go_stanford/train/
+    test: /home/<username>/data_splits/go_stanford/test/
+    end_slack: 0  # 该数据集轨迹质量较好，不需要截断末尾
+    goals_per_obs: 2  # 每个观测采样2个目标，增加数据集规模
+    negative_mining: True
+  
+  # Cory Hall数据集：室内走廊导航数据集
+  cory_hall:
+    data_folder: /home/<username>/vint_dataset/cory_hall/
+    train: /home/<username>/data_splits/cory_hall/train/
+    test: /home/<username>/data_splits/cory_hall/test/
+    end_slack: 3  # 许多轨迹以碰撞结束，需要截断末尾帧
+    goals_per_obs: 1
+    negative_mining: True
+  
+  # Tartan Drive数据集：越野地形导航数据集
+  tartan_drive:
+    data_folder: /home/<username>/vint_dataset/tartan_drive/
+    train: /home/<username>/data_splits/tartan_drive/train/
+    test: /home/<username>/data_splits/tartan_drive/test/
+    end_slack: 3  # 许多轨迹以碰撞结束，需要截断末尾帧
+    goals_per_obs: 1
+    negative_mining: True
+  
+  # SACSoN数据集：多样化室内外导航数据集
+  sacson:
+    data_folder: /home/<username>/vint_dataset/sacson/
+    train: /home/<username>/data_splits/sacson/train/
+    test: /home/<username>/data_splits/sacson/test/
+    end_slack: 3  # 许多轨迹以碰撞结束，需要截断末尾帧
+    goals_per_obs: 1
+    negative_mining: True
+
+  # ========== 私有数据集（如果有访问权限请取消注释） ==========
+  # Seattle数据集：西雅图城市导航数据集
+  # seattle:
+  #   data_folder: /home/<username>/vint_dataset/seattle/
+  #   train: /home/<username>/data_splits/seattle/train/
+  #   test: /home/<username>/data_splits/seattle/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  
+  # SCAND数据集：大规模室内导航数据集
+  # scand:
+  #   data_folder: /home/<username>/vint_dataset/scand/
+  #   train: /home/<username>/data_splits/scand/train/
+  #   test: /home/<username>/data_splits/scand/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+
+# ========== 日志和可视化配置 ==========
+# 控制训练过程中的日志记录频率和内容
+
+print_log_freq: 100  # 每隔多少次迭代打印一次训练日志到控制台（设为0关闭）
+                     # 包括损失值、学习率等信息
+
+image_log_freq: 1000  # 每隔多少次迭代记录一次可视化图像到wandb（设为0关闭）
+                      # 用于可视化模型预测的轨迹、注意力图等
+
+num_images_log: 8  # 每次记录时保存的图像数量（设为0关闭图像记录）
+                   # 从当前批次中随机选择指定数量的样本进行可视化
+
+pairwise_test_freq: 0  # 每隔多少个epoch进行一次成对测试（设为0关闭）
+                       # 成对测试用于评估模型在特定任务上的性能
+
+eval_fraction: 0.25  # 评估时使用的数据集比例（0-1之间）
+                     # 0.25表示每次评估只使用25%的测试数据，可加快评估速度
+
+wandb_log_freq: 10  # 每隔多少次迭代记录一次指标到wandb（设为0关闭）
+                    # 包括损失曲线、学习率曲线等
+
+eval_freq: 1  # 每隔多少个epoch进行一次完整评估（仅用于NoMaD模型）
+              # 设为1表示每个epoch结束后都进行评估

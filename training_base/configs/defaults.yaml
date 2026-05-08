@@ -200,13 +200,15 @@ logging:
   # 指标日志频率（步）
   metric_log_freq: 100
   # 图像日志频率（步）
-  image_log_freq: 1000
+  image_log_freq: 2000
   # 重指标日志频率（步）
   heavy_metric_log_freq: 1000
   # 重指标开始步数
   heavy_metric_start_step: 1000
+  # 评估阶段每个数据集每次 eval 至少记录一次重指标，避免 dataset-specific behavior 曲线缺失
+  eval_heavy_every_eval: true
   # 图像日志开始步数
-  image_start_step: 3000
+  image_start_step: 1000
   # 性能日志频率（步）
   perf_log_freq: 50
   # 是否按 global_step 统计频率
@@ -223,7 +225,7 @@ visualization:
   # 每次可视化记录的图片数量
   num_images_log: 8
   # 动作采样数量（NoMaD 可用）
-  num_action_samples_log: 8
+  num_action_samples_log: 30
   # 训练阶段可视化器列表
   train:
     - name: supervised_waypoint
