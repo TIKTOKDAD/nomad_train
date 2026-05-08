@@ -8,6 +8,8 @@
 # 4. 将 CLI 开关写回 runtime 配置
 
 import argparse
+import os
+import shutil
 from copy import deepcopy
 from typing import Any, Dict
 
@@ -97,6 +99,35 @@ def load_config(default_path: str, user_path: str) -> Dict[str, Any]:
     # 记录用户配置路径，日志 sink 可上传/保存该文件以便复现实验
     config["config_path"] = user_path
     return normalize_config(config)
+
+
+def safe_config_for_logging(config: Dict[str, Any]) -> Dict[str, Any]:
+    clean = deepcopy(config)
+    for sink in clean.get("logging", {}).get("sinks", []):
+        sink.pop("full_config", None)
+    return clean
+
+
+def run_config_artifact_paths(project_folder: str) -> Dict[str, str]:
+    return {
+        "resolved": os.path.join(project_folder, "config.resolved.yaml"),
+        "user": os.path.join(project_folder, "config.user.yaml"),
+    }
+
+
+def save_run_configs(config: Dict[str, Any], project_folder: str) -> Dict[str, str]:
+    paths = dict(config.get("runtime", {}).get("config_artifact_paths") or run_config_artifact_paths(project_folder))
+    os.makedirs(project_folder, exist_ok=True)
+
+    with open(paths["resolved"], "w", encoding="utf-8") as f:
+        yaml.safe_dump(safe_config_for_logging(config), f, allow_unicode=True, sort_keys=False)
+
+    user_config_path = config.get("config_path")
+    if user_config_path and os.path.exists(user_config_path):
+        shutil.copyfile(user_config_path, paths["user"])
+    else:
+        paths.pop("user", None)
+    return paths
 
 
 # 构建命令行参数解析器

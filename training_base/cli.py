@@ -13,7 +13,14 @@ import time
 
 import torch
 
-from training_base.core.config import apply_cli_overrides, build_arg_parser, load_config
+from training_base.core.config import (
+    apply_cli_overrides,
+    build_arg_parser,
+    load_config,
+    run_config_artifact_paths,
+    safe_config_for_logging,
+    save_run_configs,
+)
 from training_base.core.runtime import (
     barrier,
     broadcast_string,
@@ -78,14 +85,26 @@ def _prepare_project_folder(config, context) -> None:
     barrier()
 
 
+# 保存本次 run 的配置快照
+def _prepare_run_config_artifacts(config, context) -> None:
+    runtime = config["runtime"]
+    paths = run_config_artifact_paths(runtime["project_folder"])
+    runtime["config_artifact_paths"] = paths
+    if context.is_main_process:
+        runtime["config_artifact_paths"] = save_run_configs(config, runtime["project_folder"])
+    barrier()
+
+
 # 为各日志 sink 填充统一的默认字段
 def _prepare_logging(config) -> None:
+    full_config = safe_config_for_logging(config)
     for sink in config["logging"].get("sinks", []):
         # sink 自己只读 logging 子配置，这里把 runtime/config 的全局信息补进去
         sink.setdefault("project", config["runtime"]["project_name"])
         sink.setdefault("run_name", config["runtime"]["run_name"])
         sink.setdefault("config_path", config.get("config_path"))
-        sink.setdefault("full_config", config)
+        sink.setdefault("config_artifact_paths", config["runtime"].get("config_artifact_paths", {}))
+        sink.setdefault("full_config", full_config)
 
 
 # 主流程：加载配置 -> 运行时初始化 -> 数据准备 -> 训练/构建缓存
@@ -112,6 +131,7 @@ def main(argv=None) -> None:
     setup_seed(config["runtime"])
     setup_cudnn(config["runtime"])
     _prepare_project_folder(config, context)
+    _prepare_run_config_artifacts(config, context)
     _prepare_logging(config)
 
     # 主进程打印最终配置，便于复现实验
