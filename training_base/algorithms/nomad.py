@@ -63,7 +63,7 @@ class NoMaDAlgorithm(Algorithm):
 
         # 读取最新检查点与辅助状态
         load_project_folder = os.path.join("logs", load_run)
-        print("Loading model from ", load_project_folder)
+        print("正在从以下目录加载模型: ", load_project_folder)
         latest_checkpoint = load_checkpoint(find_latest_checkpoint(load_project_folder), device)
         load_model_state(model, latest_checkpoint, strict=False, model_name=config["model"]["name"])
 
@@ -103,7 +103,7 @@ class NoMaDAlgorithm(Algorithm):
             optimizer.load_state_dict(optimizer_state if isinstance(optimizer_state, dict) else optimizer_state.state_dict())
         if scheduler is not None and scheduler_state is not None:
             scheduler.load_state_dict(scheduler_state if isinstance(scheduler_state, dict) else scheduler_state.state_dict())
-        print(f"Resuming training from epoch {current_epoch}")
+        print(f"从第 {current_epoch} 轮继续训练")
         global_step = latest_checkpoint.get("global_step", 0) if isinstance(latest_checkpoint, dict) else 0
         # 返回恢复状态，包含 EMA 权重与 global_step
         return ResumeState(
@@ -128,7 +128,7 @@ class NoMaDAlgorithm(Algorithm):
                 # remap_legacy_state_dict 处理旧命名，例如 noise_pred_net -> diffusion_model
                 ema_state = remap_legacy_state_dict("nomad", strip_module_prefix(resume_ema))
                 incompatible = ema_model.averaged_model.load_state_dict(ema_state, strict=False)
-                report_state_key_differences(incompatible, label="NoMaD EMA state")
+                report_state_key_differences(incompatible, label="NoMaD EMA 状态")
         return NoMaDState(noise_scheduler=model_extras["noise_scheduler"], ema_model=ema_model, objective=objective)
 
     # 数据预处理：图像变换、可视化缩放、张量迁移

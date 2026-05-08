@@ -88,7 +88,7 @@ def _clip_gradients(model, optimizer, grad_scaler, clip_config) -> None:
         torch.nn.utils.clip_grad_value_(params, clip_value)
         return
     if mode != "norm":
-        raise ValueError(f"Unsupported gradient_clip.mode '{mode}'. Expected 'norm' or 'value'.")
+        raise ValueError(f"不支持的 gradient_clip.mode '{mode}'。应为 'norm' 或 'value'。")
     # norm 模式按整体范数裁剪，是训练配置的默认语义
     torch.nn.utils.clip_grad_norm_(
         params,

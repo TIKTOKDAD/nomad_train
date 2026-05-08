@@ -185,8 +185,8 @@ def setup_runtime(config) -> RuntimeContext:
         and bool(config.get("require_ddp_for_multigpu", True))
     ):
         raise RuntimeError(
-            "Multi-GPU training requires torchrun/DDP. "
-            "Launch from the train directory with: "
+            "多 GPU 训练必须使用 torchrun/DDP。"
+            "请从训练目录启动: "
             "CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 train.py "
             "-c config/nomad_retrain.yaml"
         )
@@ -202,11 +202,11 @@ def setup_runtime(config) -> RuntimeContext:
             device = torch.device("cuda", 0)
         if main:
             visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", ",".join(str(x) for x in gpu_ids))
-            print("Using cuda devices:", visible_devices)
+            print("使用 CUDA 设备:", visible_devices)
     else:
         device = torch.device("cpu")
         if main:
-            print("Using cpu")
+            print("使用 CPU")
 
     return RuntimeContext(
         device=device,
@@ -227,7 +227,6 @@ def wrap_distributed_model(model: nn.Module, config, context: RuntimeContext) ->
     if torch.cuda.is_available() and len(config.get("gpu_ids", [0])) > 1:
         # 防止用户误以为 gpu_ids=[0,1] 会自动 DataParallel
         raise RuntimeError(
-            "Multi-GPU training requires torchrun/DDP. Single-process multi-GPU fallback is not supported "
-            "by the native training_base runtime."
+            "多 GPU 训练必须使用 torchrun/DDP。training_base 原生运行时不支持单进程多 GPU 回退。"
         )
     return model

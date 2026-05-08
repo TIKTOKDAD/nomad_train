@@ -109,12 +109,12 @@ def require_lmdb_ready_before_ddp(config) -> None:
     if errors:
         # DDP 下每个 rank 同时构建 LMDB 风险很高，因此要求先单进程 build-lmdb-only
         raise RuntimeError(
-            "DDP training requires all LMDB caches to be prebuilt and complete.\n"
-            "Run this first with a single process:\n"
+            "DDP 训练要求所有 LMDB 缓存已经预构建且完整。\n"
+            "请先用单进程运行:\n"
             "  python -m training_base.cli -c training_base/configs/nomad_retrain.yaml --build-lmdb-only\n"
-            "If a previous build was interrupted, add:\n"
+            "如果之前的构建被中断，请追加:\n"
             "  --rebuild-incomplete-lmdb\n\n"
-            f"LMDB problems:\n{format_lmdb_cache_errors(errors)}"
+            f"LMDB 问题:\n{format_lmdb_cache_errors(errors)}"
         )
 
 
@@ -266,8 +266,8 @@ class NavigationDataModule:
             # 保持语义清晰：每个 rank 的 batch = global_batch_size / world_size
             if train_batch_size % self.context.world_size != 0:
                 raise ValueError(
-                    f"Global batch_size={train_batch_size} must be divisible by "
-                    f"world_size={self.context.world_size} to preserve DDP batch semantics."
+                    f"全局 batch_size={train_batch_size} 必须能被 "
+                    f"world_size={self.context.world_size} 整除，以保持 DDP batch 语义。"
                 )
             train_batch_size = train_batch_size // self.context.world_size
             self.train_sampler = DistributedSampler(
@@ -305,7 +305,7 @@ class NavigationDataModule:
 
         if self.context.is_main_process:
             print(
-                "Navigation DataLoader config: "
+                "导航 DataLoader 配置: "
                 f"global_batch_size={global_batch_size}, "
                 f"per_device_batch_size={train_batch_size}, "
                 f"eval_batch_size={runtime['eval_batch_size']}, "

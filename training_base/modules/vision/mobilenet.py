@@ -76,7 +76,7 @@ class MobileNetEncoder(nn.Module):
             or len(inverted_residual_setting[0]) != 4
         ):
             raise ValueError(
-                f"inverted_residual_setting should be non-empty or a 4-element list, got {inverted_residual_setting}"
+                f"inverted_residual_setting 必须非空，且每项为 4 元素列表，实际为 {inverted_residual_setting}"
             )
 
         # 构建首层卷积

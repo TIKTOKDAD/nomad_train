@@ -13,7 +13,7 @@ def masked_reduce(unreduced: torch.Tensor, mask: torch.Tensor, eps: float = 1e-2
     while unreduced.dim() > 1:
         unreduced = unreduced.mean(dim=-1)
     if unreduced.shape != mask.shape:
-        raise ValueError(f"{unreduced.shape} != {mask.shape}")
+        raise ValueError(f"形状不匹配: {unreduced.shape} != {mask.shape}")
     # eps 避免全 0 mask 时除零；全 0 时结果会接近 0
     return (unreduced * mask).mean() / (mask.mean() + eps)
 

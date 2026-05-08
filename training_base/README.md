@@ -4,6 +4,8 @@
 
 For the full project requirements, design boundaries, directory responsibilities, and the process for adding new networks, see [REQUIREMENTS.md](REQUIREMENTS.md).
 
+For a concrete Chinese step-by-step guide with a full new-paper example, see [ADDING_NEW_PAPER.md](ADDING_NEW_PAPER.md).
+
 ## Layers
 
 ```text

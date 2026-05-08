@@ -50,7 +50,7 @@ def _resolved_distance_bounds(min_dist_cat: int, max_dist_cat: int, waypoint_spa
     distance_categories = list(range(min_dist_cat, max_dist_cat + 1, waypoint_spacing))
     if len(distance_categories) == 0:
         raise ValueError(
-            f"Invalid distance range: min={min_dist_cat}, max={max_dist_cat}, spacing={waypoint_spacing}"
+            f"无效的距离范围: min={min_dist_cat}, max={max_dist_cat}, spacing={waypoint_spacing}"
         )
     # 返回最小/最大可用距离
     return distance_categories[0], distance_categories[-1]
@@ -117,10 +117,10 @@ def _validate_lmdb_cache(
     errors = []
     # 1) 缓存目录是否存在
     if not _path_exists(cache_path):
-        errors.append(f"missing LMDB cache: {cache_path}")
+        errors.append(f"缺少 LMDB 缓存: {cache_path}")
     # 2) 完成标记是否存在
     if not os.path.exists(complete_path):
-        errors.append(f"missing completion marker: {complete_path}")
+        errors.append(f"缺少完成标记: {complete_path}")
         return False, errors
 
     # 3) 标记内容可读且字段齐全
@@ -128,25 +128,25 @@ def _validate_lmdb_cache(
         with open(complete_path, "r", encoding="utf-8") as f:
             marker = json.load(f)
     except Exception as exc:
-        errors.append(f"invalid completion marker {complete_path}: {exc}")
+        errors.append(f"完成标记无效 {complete_path}: {exc}")
         return False, errors
 
     # 4) 版本号是否匹配
     if int(marker.get("version", -1)) != LMDB_CACHE_VERSION:
         errors.append(
-            f"marker version mismatch for {complete_path}: "
+            f"完成标记版本不匹配 {complete_path}: "
             f"{marker.get('version')} != {LMDB_CACHE_VERSION}"
         )
     # 5) 数据集名称是否匹配
     if marker.get("dataset_name") != dataset_name:
         errors.append(
-            f"marker dataset mismatch for {complete_path}: "
+            f"完成标记数据集不匹配 {complete_path}: "
             f"{marker.get('dataset_name')} != {dataset_name}"
         )
     # 6) 缓存图像数量是否匹配
     if int(marker.get("num_cached_images", -1)) != int(expected_num_images):
         errors.append(
-            f"cached image count mismatch for {complete_path}: "
+            f"缓存图像数量不匹配 {complete_path}: "
             f"{marker.get('num_cached_images')} != {expected_num_images}"
         )
     return len(errors) == 0, errors
@@ -176,13 +176,13 @@ def check_lmdb_cache_ready(
     cache_path, complete_path = get_lmdb_cache_paths(data_split_folder, dataset_name)
     # 索引文件缺失直接返回错误
     if not os.path.exists(index_path):
-        return False, [f"missing dataset index: {index_path}"]
+        return False, [f"缺少数据集索引: {index_path}"]
 
     # 索引文件存在时读取期望数量
     try:
         expected_num_images = _load_expected_lmdb_count(index_path)
     except Exception as exc:
-        return False, [f"failed to load dataset index {index_path}: {exc}"]
+        return False, [f"加载数据集索引失败 {index_path}: {exc}"]
 
     return _validate_lmdb_cache(cache_path, complete_path, dataset_name, expected_num_images)
 
@@ -342,7 +342,7 @@ class NavigationDataset(Dataset):
             "temporal",
             "randomized",
             "randomized_temporal",
-        }, "context_type must be one of temporal, randomized, randomized_temporal"
+        }, "context_type 必须是 temporal、randomized 或 randomized_temporal 之一"
         self.context_type = context_type
 
         # ========== 其他配置 ==========
@@ -359,7 +359,7 @@ class NavigationDataset(Dataset):
         self.lmdb_max_readers = lmdb_max_readers
         self.lmdb_cache_mode = str(lmdb_cache_mode).lower()
         if self.lmdb_cache_mode not in {"auto", "read", "build"}:
-            raise ValueError("lmdb_cache_mode must be one of: auto, read, build")
+            raise ValueError("lmdb_cache_mode 必须是 auto、read 或 build 之一")
         self.rebuild_incomplete_lmdb = rebuild_incomplete_lmdb
 
         # ========== 加载数据集配置 ==========
@@ -371,7 +371,7 @@ class NavigationDataset(Dataset):
             all_data_config = yaml.safe_load(f)
         assert (
                 self.dataset_name in all_data_config
-        ), f"Dataset {self.dataset_name} not found in data_config.yaml"
+        ), f"在 data_config.yaml 中找不到数据集 {self.dataset_name}"
 
         # 获取数据集索引（用于多数据集训练时的标识）
         dataset_names = list(all_data_config.keys())
@@ -451,11 +451,11 @@ class NavigationDataset(Dataset):
         if self.lmdb_cache_mode == "read" and not cache_ready:
             joined_errors = "\n  - ".join(cache_errors)
             raise RuntimeError(
-                "LMDB cache is missing or incomplete, but lmdb_cache_mode='read'.\n"
-                f"Dataset: {self.dataset_name}\n"
-                f"Split folder: {self.data_split_folder}\n"
-                f"Problems:\n  - {joined_errors}\n"
-                "Please run: python train.py -c <config> --build-lmdb-only"
+                "LMDB 缓存缺失或不完整，但 lmdb_cache_mode='read'。\n"
+                f"数据集: {self.dataset_name}\n"
+                f"划分目录: {self.data_split_folder}\n"
+                f"问题:\n  - {joined_errors}\n"
+                "请运行: python -m training_base.cli -c <config> --build-lmdb-only"
             )
 
         # 需要构建且缓存不完整时执行重建逻辑
@@ -465,12 +465,12 @@ class NavigationDataset(Dataset):
                 if not self.rebuild_incomplete_lmdb:
                     joined_errors = "\n  - ".join(cache_errors)
                     raise RuntimeError(
-                        "Found an incomplete or unverified LMDB cache.\n"
-                        f"Dataset: {self.dataset_name}\n"
-                        f"Split folder: {self.data_split_folder}\n"
-                        f"Problems:\n  - {joined_errors}\n"
-                        "To rebuild it safely, rerun with --rebuild-incomplete-lmdb "
-                        "or set rebuild_incomplete_lmdb: True."
+                        "发现不完整或未经校验的 LMDB 缓存。\n"
+                        f"数据集: {self.dataset_name}\n"
+                        f"划分目录: {self.data_split_folder}\n"
+                        f"问题:\n  - {joined_errors}\n"
+                        "如需安全重建，请重新运行时加 --rebuild-incomplete-lmdb，"
+                        "或设置 rebuild_incomplete_lmdb: True。"
                     )
                 _remove_path(cache_filename)
                 if os.path.exists(complete_filename):
@@ -483,7 +483,7 @@ class NavigationDataset(Dataset):
                 self.goals_index,
                 disable=not use_tqdm,
                 dynamic_ncols=True,
-                desc=f"Building LMDB cache for {self.dataset_name}"
+                desc=f"正在为 {self.dataset_name} 构建 LMDB 缓存"
             )
             # 写入阶段使用临时 LMDB，全部成功后再原子重命名，避免中断后留下“看似存在但不完整”的缓存。
             num_cached_images = 0
@@ -502,7 +502,7 @@ class NavigationDataset(Dataset):
             if num_cached_images != expected_num_images:
                 _remove_path(tmp_cache_filename)
                 raise RuntimeError(
-                    f"LMDB build count mismatch for {self.dataset_name}: "
+                    f"{self.dataset_name} 的 LMDB 构建数量不匹配: "
                     f"{num_cached_images} != {expected_num_images}"
                 )
 
@@ -520,7 +520,7 @@ class NavigationDataset(Dataset):
 
         elif should_build and cache_ready:
             # 已有完整缓存则直接复用
-            print(f"LMDB cache already complete for {self.dataset_name}: {cache_filename}")
+            print(f"{self.dataset_name} 的 LMDB 缓存已完整: {cache_filename}")
 
         # 以只读模式重新打开缓存文件；这些参数只影响读取性能，不改变读取到的数据内容。
         self._image_cache: lmdb.Environment = lmdb.open(
@@ -654,8 +654,8 @@ class NavigationDataset(Dataset):
                 return
             except (OSError, EOFError, pickle.PickleError, ValueError, AttributeError) as exc:
                 raise RuntimeError(
-                    "Failed to load dataset index. Remove or rebuild the index file after "
-                    f"checking the dataset split and parameters: {index_to_data_path}"
+                    "加载数据集索引失败。请检查数据划分和参数后，删除或重建索引文件: "
+                    f"{index_to_data_path}"
                 ) from exc
 
         # 如果索引文件不存在，创建它
@@ -695,7 +695,7 @@ class NavigationDataset(Dataset):
             return img_path_to_data(image_bytes, self.image_size)
         except Exception as exc:
             raise RuntimeError(
-                f"Unable to read image from LMDB cache for dataset '{self.dataset_name}': {image_path}"
+                f"无法从数据集 '{self.dataset_name}' 的 LMDB 缓存读取图像: {image_path}"
             ) from exc
 
     def _compute_actions(self, traj_data, curr_time, goal_time):
@@ -740,9 +740,9 @@ class NavigationDataset(Dataset):
             positions = np.concatenate([positions, np.repeat(positions[-1][None], const_len, axis=0)], axis=0)
 
         # 验证形状
-        assert yaw.shape == (self.len_traj_pred + 1,), f"{yaw.shape} and {(self.len_traj_pred + 1,)} should be equal"
+        assert yaw.shape == (self.len_traj_pred + 1,), f"{yaw.shape} 与 {(self.len_traj_pred + 1,)} 应相等"
         assert positions.shape == (self.len_traj_pred + 1,
-                                   2), f"{positions.shape} and {(self.len_traj_pred + 1, 2)} should be equal"
+                                   2), f"{positions.shape} 与 {(self.len_traj_pred + 1, 2)} 应相等"
 
         # 转换到局部坐标系（以当前位置和朝向为参考）
         # 这使得动作与机器人的绝对位置和朝向无关
@@ -750,7 +750,7 @@ class NavigationDataset(Dataset):
         goal_pos = to_local_coords(goal_pos, positions[0], yaw[0])
 
         assert waypoints.shape == (self.len_traj_pred + 1,
-                                   2), f"{waypoints.shape} and {(self.len_traj_pred + 1, 2)} should be equal"
+                                   2), f"{waypoints.shape} 与 {(self.len_traj_pred + 1, 2)} 应相等"
 
         # 构建动作序列
         if self.learn_angle:
@@ -769,7 +769,7 @@ class NavigationDataset(Dataset):
             goal_pos /= self.data_config["metric_waypoint_spacing"] * self.waypoint_spacing
 
         assert actions.shape == (self.len_traj_pred,
-                                 self.num_action_params), f"{actions.shape} and {(self.len_traj_pred, self.num_action_params)} should be equal"
+                                 self.num_action_params), f"{actions.shape} 与 {(self.len_traj_pred, self.num_action_params)} 应相等"
 
         return actions, goal_pos
 
@@ -860,7 +860,7 @@ class NavigationDataset(Dataset):
             # 每个时间步都绑定当前轨迹名，后续逐帧读取图像
             context = [(f_curr, t) for t in context_times]
         else:
-            raise ValueError(f"Invalid context type {self.context_type}")
+            raise ValueError(f"无效的 context_type: {self.context_type}")
 
         # 拼接所有上下文图像（包括当前观测）
         # 形状: [3*(context_size+1), H, W]
@@ -878,11 +878,11 @@ class NavigationDataset(Dataset):
         # 获取当前轨迹与目标轨迹（可能相同也可能不同）
         curr_traj_data = self._get_trajectory(f_curr)
         curr_traj_len = len(curr_traj_data["position"])
-        assert curr_time < curr_traj_len, f"{curr_time} and {curr_traj_len}"
+        assert curr_time < curr_traj_len, f"当前时间 {curr_time} 必须小于当前轨迹长度 {curr_traj_len}"
 
         goal_traj_data = self._get_trajectory(f_goal)
         goal_traj_len = len(goal_traj_data["position"])
-        assert goal_time < goal_traj_len, f"{goal_time} an {goal_traj_len}"
+        assert goal_time < goal_traj_len, f"目标时间 {goal_time} 必须小于目标轨迹长度 {goal_traj_len}"
 
         # ========== 计算动作标签 ==========
         # actions: [len_traj_pred, num_action_params] 局部坐标系下的航点序列
@@ -900,7 +900,7 @@ class NavigationDataset(Dataset):
             # 正样本：计算实际距离（航点数）
             distance = (goal_time - curr_time) // self.waypoint_spacing
             assert (
-                               goal_time - curr_time) % self.waypoint_spacing == 0, f"{goal_time} and {curr_time} should be separated by an integer multiple of {self.waypoint_spacing}"
+                               goal_time - curr_time) % self.waypoint_spacing == 0, f"goal_time={goal_time} 与 curr_time={curr_time} 的间隔必须是 waypoint_spacing={self.waypoint_spacing} 的整数倍"
 
         # ========== 处理动作标签 ==========
         # numpy -> torch，并按需转换角度表示

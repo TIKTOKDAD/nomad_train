@@ -34,7 +34,7 @@ class NoMaDDiffusionObjective:
         self.alpha = float(config["alpha"])
         self.distance_mask_mode = str(config.get("distance_mask_mode", "per_sample")).lower()
         if self.distance_mask_mode not in {"per_sample", "legacy_scalar"}:
-            raise ValueError("objective.distance_mask_mode must be one of: per_sample, legacy_scalar")
+            raise ValueError("objective.distance_mask_mode 必须是 per_sample 或 legacy_scalar 之一")
         self.action_stats = load_action_stats(config.get("action_stats"))
         losses = config.get("losses", {})
         # distance/diffusion 两个子损失可分别配置，但默认都用 MSE
@@ -65,7 +65,7 @@ class NoMaDDiffusionObjective:
         deltas = get_delta_torch(actions)
         naction = normalize_data_torch(deltas, self.action_stats)
         if naction.shape[-1] != 2:
-            raise ValueError("action dim must be 2")
+            raise ValueError("action 维度必须为 2")
 
         # 距离损失按可见目标进行加权
         dist_pred = model.predict_distance(obsgoal_cond)

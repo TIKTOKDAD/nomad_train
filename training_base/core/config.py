@@ -59,20 +59,20 @@ def validate_config(config: Dict[str, Any]) -> None:
     # 顶层 section 缺失会导致训练中后段才报错，这里提前失败更容易定位
     missing = [section for section in REQUIRED_SECTIONS if section not in config]
     if missing:
-        raise KeyError(f"Missing required config sections: {', '.join(missing)}")
+        raise KeyError(f"缺少必需的配置区块: {', '.join(missing)}")
     for section in REQUIRED_SECTIONS:
         # callbacks 设计成列表，因为同一训练可以启用多个回调
         if section == "callbacks":
             if not isinstance(config[section], list):
-                raise TypeError("callbacks must be a list")
+                raise TypeError("callbacks 必须是列表")
         elif not isinstance(config[section], dict):
-            raise TypeError(f"{section} must be a mapping")
+            raise TypeError(f"{section} 必须是映射/字典")
     if not config["algorithm"].get("name"):
-        raise KeyError("algorithm.name is required")
+        raise KeyError("必须配置 algorithm.name")
     if not config["model"].get("name"):
-        raise KeyError("model.name is required")
+        raise KeyError("必须配置 model.name")
     if not config["objective"].get("name"):
-        raise KeyError("objective.name is required")
+        raise KeyError("必须配置 objective.name")
 
 
 # 规范化配置：关键名称统一小写，并执行校验
@@ -101,24 +101,24 @@ def load_config(default_path: str, user_path: str) -> Dict[str, Any]:
 
 # 构建命令行参数解析器
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Navigation training base")
+    parser = argparse.ArgumentParser(description="视觉导航训练基座")
     # -c/--config 指向用户配置，defaults.yaml 会自动作为基础配置合并
     parser.add_argument(
         "--config",
         "-c",
         default="nomad_retrain.yaml",
         type=str,
-        help="Path to the training config file.",
+        help="训练配置文件路径。",
     )
     parser.add_argument(
         "--build-lmdb-only",
         action="store_true",
-        help="Build all configured LMDB caches with one process, then exit before training.",
+        help="用单进程构建所有已配置的 LMDB 缓存，然后在训练前退出。",
     )
     parser.add_argument(
         "--rebuild-incomplete-lmdb",
         action="store_true",
-        help="Remove incomplete/unverified LMDB caches and rebuild them during --build-lmdb-only.",
+        help="在 --build-lmdb-only 模式下删除不完整或未校验的 LMDB 缓存并重建。",
     )
     return parser
 

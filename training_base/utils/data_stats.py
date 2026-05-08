@@ -108,7 +108,7 @@ def collect_multi_dataset_stats(all_datasets_root: str, len_traj_pred: int = 8, 
         ds_root = os.path.join(all_datasets_root, name)
         stats = collect_one_dataset_stats(ds_root, len_traj_pred=len_traj_pred, stride=stride)
         if stats is None:
-            print(f"[SKIP] {name}: no valid traj_data.pkl files")
+            print(f"[跳过] {name}: 没有有效的 traj_data.pkl 文件")
             continue
 
         spacing = float(stats["metric_waypoint_spacing"])
@@ -116,10 +116,10 @@ def collect_multi_dataset_stats(all_datasets_root: str, len_traj_pred: int = 8, 
         if stats["deltas"] is not None:
             # 归一化到“每个数据集自身 spacing”为单位，减弱不同机器人/数据集尺度差异
             global_deltas.append(stats["deltas"] / spacing)
-        print(f"[OK] {name}: spacing = {spacing:.6f}")
+        print(f"[完成] {name}: 间距 = {spacing:.6f}")
 
     if not global_deltas:
-        raise RuntimeError("No valid action deltas were collected.")
+        raise RuntimeError("没有收集到有效的动作增量。")
 
     # 计算动作的分位数范围，避免极端值
     global_deltas = np.concatenate(global_deltas, axis=0)
@@ -138,7 +138,7 @@ def collect_multi_dataset_stats(all_datasets_root: str, len_traj_pred: int = 8, 
 # 命令行入口：打印建议写入 data_config.yaml 的配置片段
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("datasets_root", help="Directory containing dataset subdirectories.")
+    parser.add_argument("datasets_root", help="包含各数据集子目录的目录。")
     parser.add_argument("--len-traj-pred", type=int, default=8)
     parser.add_argument("--stride", type=int, default=1)
     args = parser.parse_args()
@@ -148,7 +148,7 @@ def main() -> None:
         len_traj_pred=args.len_traj_pred,
         stride=args.stride,
     )
-    print("\n# Suggested data_config.yaml entries")
+    print("\n# 建议写入 data_config.yaml 的配置片段")
     print("action_stats:")
     print(f"  min: {stats['action_stats']['min']}")
     print(f"  max: {stats['action_stats']['max']}")

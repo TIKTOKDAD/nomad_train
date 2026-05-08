@@ -101,9 +101,9 @@ def compute_nomad_behavior_metrics(
     gc_distance = output["gc_distance"]
 
     if uc_actions.shape != batch_action_label.shape:
-        raise ValueError(f"{uc_actions.shape} != {batch_action_label.shape}")
+        raise ValueError(f"无条件动作形状不匹配: {uc_actions.shape} != {batch_action_label.shape}")
     if gc_actions.shape != batch_action_label.shape:
-        raise ValueError(f"{gc_actions.shape} != {batch_action_label.shape}")
+        raise ValueError(f"有目标条件动作形状不匹配: {gc_actions.shape} != {batch_action_label.shape}")
 
     # 距离回归损失
     distance_loss = loss_registry.get("mse")

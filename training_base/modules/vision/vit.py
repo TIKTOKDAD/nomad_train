@@ -60,10 +60,10 @@ class ViT(nn.Module):
         # 横向拼接观测帧和目标图，得到 [B,3,H,W*(context+2)]
         obsgoal_img_list = obs_img_list + [goal_img]
         x = torch.cat(obsgoal_img_list, dim=-1)
-        assert len(x.shape) == 4, "input image shape is not 4D"
-        assert x.shape[1] == 3, "input image channel is not 3"
-        assert x.shape[2] == self.image_height, f"input image height is not {self.image_height}"
-        assert x.shape[3] == self.image_width*(self.context_size + 2), f"input image width is not {self.image_width}*(context_size + 2)"
+        assert len(x.shape) == 4, "输入图像必须是 4D 张量"
+        assert x.shape[1] == 3, "输入图像通道数必须为 3"
+        assert x.shape[2] == self.image_height, f"输入图像高度必须为 {self.image_height}"
+        assert x.shape[3] == self.image_width*(self.context_size + 2), f"输入图像宽度必须为 {self.image_width}*(context_size + 2)"
        
         final_repr = self.ViT(x)
         
@@ -82,7 +82,7 @@ def posemb_sincos_2d(patches, temperature = 10000, dtype = torch.float32):
     _, h, w, dim, device, dtype = *patches.shape, patches.device, patches.dtype
 
     y, x = torch.meshgrid(torch.arange(h, device = device), torch.arange(w, device = device), indexing = 'ij')
-    assert (dim % 4) == 0, 'feature dimension must be multiple of 4 for sincos emb'
+    assert (dim % 4) == 0, '特征维度必须是 4 的倍数，才能生成 sincos 位置编码'
     omega = torch.arange(dim // 4, device = device) / (dim // 4 - 1)
     omega = 1. / (temperature ** omega)
 
@@ -164,7 +164,7 @@ class MaskedGoalViT(nn.Module):
         image_height, image_width = pair(image_size)
         patch_height, patch_width = pair(patch_size)
 
-        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, '图像尺寸必须能被 patch_size 整除。'
 
         # 计算 patch 网格大小和每个 patch 展平后的像素维度
         num_patches = (image_height // patch_height) * (image_width // patch_width)
@@ -184,7 +184,7 @@ class MaskedGoalViT(nn.Module):
         self.to_latent = nn.Identity()
 
         self.goal_mask = torch.ones((self.h, self.w))
-        assert self.w % (context_size + 2) == 0, "context_size must be a factor of numbers of patches in width"
+        assert self.w % (context_size + 2) == 0, "宽度方向 patch 数必须能被 context_size + 2 整除"
         # 最后一段宽度对应 goal 图像；goal_mask=0 表示这些 token 可被屏蔽
         self.goal_mask[:, -self.w//(context_size + 2):] = 0
         self.goal_mask = rearrange(self.goal_mask, 'h w -> (h w)')

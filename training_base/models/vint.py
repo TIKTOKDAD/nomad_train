@@ -26,7 +26,7 @@ class ViNT(BaseModel):
         super().__init__(context_size, len_traj_pred, learn_angle)
         # encoder/head 由 models.__init__.build_vint 负责组装，这里只做完整性检查
         if encoder is None or head is None:
-            raise ValueError("ViNT requires prebuilt encoder and head modules.")
+            raise ValueError("ViNT 需要预先构建好的 encoder 和 head 模块。")
         self.encoder = encoder
         self.head = head
 

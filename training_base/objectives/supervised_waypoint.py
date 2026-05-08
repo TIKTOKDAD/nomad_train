@@ -41,7 +41,7 @@ class SupervisedWaypointObjective:
         # dist_pred [B,1] squeeze 后与 dist_label [B] 对齐
         dist_loss = self.distance_loss(dist_pred.squeeze(-1), dist_label.float())
         if action_pred.shape != action_label.shape:
-            raise ValueError(f"{action_pred.shape} != {action_label.shape}")
+            raise ValueError(f"动作预测与标签形状不匹配: {action_pred.shape} != {action_label.shape}")
 
         # 动作损失（按 mask 归约）
         # action_reduce 会先按 T/D 求均值，再按 action_mask 对 batch 归约

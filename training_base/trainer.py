@@ -47,7 +47,7 @@ class Trainer:
             return
         message = store.display_latest()
         if message:
-            print(f"(epoch {epoch}) (batch {batch_idx}/{num_batches - 1}) {mode}: {message}")
+            print(f"(轮次 {epoch}) (批次 {batch_idx}/{num_batches - 1}) {mode}: {message}")
 
     # 单个训练 epoch：包含前向、反向、优化、日志、可视化与性能统计
     def _train_epoch(self, *, model, optimizer, dataloader, transform, device, project_folder, config, epoch, grad_scaler, state):
@@ -75,7 +75,7 @@ class Trainer:
         # 迭代训练数据，按配置控制日志与可视化节奏
         with tqdm.tqdm(
             dataloader,
-            desc=f"{self.algorithm.name} train epoch {epoch}",
+            desc=f"{self.algorithm.name} 训练轮次 {epoch}",
             leave=False,
             disable=not show_tqdm,
             dynamic_ncols=True,
@@ -193,7 +193,7 @@ class Trainer:
                 itertools.islice(dataloader, num_batches),
                 total=num_batches,
                 dynamic_ncols=True,
-                desc=f"Evaluating {eval_type} epoch {epoch}",
+                desc=f"正在评估 {eval_type} 第 {epoch} 轮",
                 leave=False,
                 disable=not show_tqdm,
             )
@@ -280,7 +280,7 @@ class Trainer:
                 # 训练阶段
                 if bool(runtime["train"]):
                     if self.context.is_main_process:
-                        print(f"Start {self.algorithm.name} Training Epoch {epoch}/{end_epoch - 1}")
+                        print(f"开始 {self.algorithm.name} 训练轮次 {epoch}/{end_epoch - 1}")
                     self._train_epoch(
                         model=model,
                         optimizer=optimizer,
@@ -302,7 +302,7 @@ class Trainer:
                 if should_eval and (self.context.is_main_process or (self.context.distributed and distributed_eval)):
                     for dataset_type, loader in self.datamodule.test_dataloaders.items():
                         if self.context.is_main_process:
-                            print(f"Start {dataset_type} Testing Epoch {epoch}/{end_epoch - 1}")
+                            print(f"开始 {dataset_type} 测试轮次 {epoch}/{end_epoch - 1}")
                         eval_summaries[dataset_type] = self._evaluate(
                             eval_type=dataset_type,
                             model=model,

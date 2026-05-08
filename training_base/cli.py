@@ -53,8 +53,8 @@ def _prepare_build_lmdb_only(config) -> None:
     # 缓存构建要求单进程，避免多个 rank 同时写同一个 LMDB 目录
     if is_torchrun():
         raise RuntimeError(
-            "build_lmdb_only must run as a single process. "
-            "Use: python -m training_base.cli -c training_base/configs/nomad_retrain.yaml --build-lmdb-only"
+            "build_lmdb_only 必须以单进程运行。"
+            "请使用: python -m training_base.cli -c training_base/configs/nomad_retrain.yaml --build-lmdb-only"
         )
     runtime["distributed"] = False
     runtime["require_ddp_for_multigpu"] = False
@@ -122,9 +122,9 @@ def main(argv=None) -> None:
         # 仅构建 LMDB：成功后直接退出
         if bool(config["runtime"].get("build_lmdb_only", False)):
             if not handle_build_lmdb_only(config, context):
-                raise RuntimeError("--build-lmdb-only is not supported by the configured visual-navigation setup.")
+                raise RuntimeError("--build-lmdb-only 不支持当前配置的视觉导航数据流程。")
             if context.is_main_process:
-                print("FINISHED LMDB CACHE BUILD")
+                print("LMDB 缓存构建完成")
             return
 
         # 常规训练流程：注册内置组件 -> 构建算法与数据模块 -> 启动训练
@@ -135,7 +135,7 @@ def main(argv=None) -> None:
         datamodule = NavigationDataModule(config, context)
         Trainer(config=config, algorithm=algorithm, datamodule=datamodule, context=context).fit()
         if context.is_main_process:
-            print("FINISHED TRAINING")
+            print("训练完成")
     finally:
         cleanup_distributed()
 

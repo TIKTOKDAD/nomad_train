@@ -24,15 +24,15 @@ _ACTION_STATS_TENSOR_CACHE = {}
 def _coerce_action_stats(stats) -> dict:
     # action_stats 必须包含同形状的 min/max，例如二维动作为 [dx, dy]
     if not isinstance(stats, dict) or "min" not in stats or "max" not in stats:
-        raise ValueError("action_stats must contain 'min' and 'max' entries.")
+        raise ValueError("action_stats 必须包含 'min' 和 'max' 字段。")
     action_stats = {
         "min": np.asarray(stats["min"], dtype=np.float32),
         "max": np.asarray(stats["max"], dtype=np.float32),
     }
     if action_stats["min"].shape != action_stats["max"].shape:
-        raise ValueError(f"action_stats min/max shapes differ: {action_stats['min'].shape} != {action_stats['max'].shape}")
+        raise ValueError(f"action_stats 的 min/max 形状不一致: {action_stats['min'].shape} != {action_stats['max'].shape}")
     if not np.all(np.isfinite(action_stats["min"])) or not np.all(np.isfinite(action_stats["max"])):
-        raise ValueError("action_stats min/max must be finite.")
+        raise ValueError("action_stats 的 min/max 必须是有限数值。")
     return action_stats
 
 

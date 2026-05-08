@@ -51,16 +51,16 @@ def extract_model_state(checkpoint: dict) -> dict:
     elif hasattr(loaded_model, "state_dict"):
         state_dict = loaded_model.state_dict()
     else:
-        raise TypeError(f"Unsupported checkpoint payload: {type(loaded_model)!r}")
+        raise TypeError(f"不支持的检查点载荷类型: {type(loaded_model)!r}")
     return strip_module_prefix(state_dict)
 
 
 # 格式化键列表，避免打印过长
 def _format_keys(keys, limit: int = 20) -> str:
     if not keys:
-        return "<none>"
+        return "<无>"
     preview = list(keys[:limit])
-    suffix = "" if len(keys) <= limit else f" ... (+{len(keys) - limit} more)"
+    suffix = "" if len(keys) <= limit else f" ... (另有 {len(keys) - limit} 个)"
     return ", ".join(preview) + suffix
 
 
@@ -115,21 +115,21 @@ def remap_legacy_state_dict(model_name: Optional[str], state_dict: dict) -> dict
             changed.append((key, new_key))
     if changed:
         preview = ", ".join(f"{old} -> {new}" for old, new in changed[:8])
-        suffix = "" if len(changed) <= 8 else f" ... (+{len(changed) - 8} more)"
-        print(f"Applied legacy {model_name} checkpoint key remap: {preview}{suffix}")
+        suffix = "" if len(changed) <= 8 else f" ... (另有 {len(changed) - 8} 个)"
+        print(f"已应用旧版 {model_name} 检查点的键重映射: {preview}{suffix}")
     return remapped
 
 
 # 打印加载过程中 missing/unexpected keys
-def report_state_key_differences(incompatible, label: str = "Checkpoint model state") -> None:
+def report_state_key_differences(incompatible, label: str = "检查点模型状态") -> None:
     # strict=False 恢复时缺失/多余 key 不会中断训练，但必须打印出来让用户可见
     missing = list(getattr(incompatible, "missing_keys", []))
     unexpected = list(getattr(incompatible, "unexpected_keys", []))
     if missing or unexpected:
         print(
-            f"{label} loaded with key differences:\n"
-            f"  missing_keys: {_format_keys(missing)}\n"
-            f"  unexpected_keys: {_format_keys(unexpected)}"
+            f"{label} 加载后存在键差异:\n"
+            f"  缺失键: {_format_keys(missing)}\n"
+            f"  多余键: {_format_keys(unexpected)}"
         )
 
 

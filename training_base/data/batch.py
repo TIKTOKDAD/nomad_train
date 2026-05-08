@@ -64,7 +64,7 @@ def as_navigation_batch(data: Sequence[torch.Tensor]) -> NavigationBatch:
     if isinstance(data, NavigationBatch):
         return data
     if len(data) not in {7, 8}:
-        raise ValueError(f"Expected 7 or 8 tensors from NavigationDataset, got {len(data)}")
+        raise ValueError(f"NavigationDataset 应返回 7 或 8 个张量，实际得到 {len(data)} 个")
     # 旧 Dataset 版本没有 metric_scale，第 8 个字段缺失时用 1.0 兜底
     metric_scale = data[7] if len(data) == 8 else torch.ones_like(data[5], dtype=torch.float32)
     return NavigationBatch(

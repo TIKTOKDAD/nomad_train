@@ -24,7 +24,7 @@ class Registry:
             # 未显式传 name 时使用对象自身 __name__，但配置化组件通常显式传小写 key
             key = name or obj.__name__
             if key in self._items:
-                raise KeyError(f"{self.name} registry already contains '{key}'")
+                raise KeyError(f"{self.name} 注册表中已经包含 '{key}'")
             self._items[key] = obj
             return obj
 
@@ -33,8 +33,8 @@ class Registry:
     # 根据名称获取对象，不存在则抛出详细错误
     def get(self, name: str) -> Callable:
         if name not in self._items:
-            available = ", ".join(sorted(self._items)) or "<empty>"
-            raise KeyError(f"Unknown {self.name} '{name}'. Available: {available}")
+            available = ", ".join(sorted(self._items)) or "<空>"
+            raise KeyError(f"未知 {self.name} '{name}'。可用项: {available}")
         return self._items[name]
 
     # 直接构建对象实例

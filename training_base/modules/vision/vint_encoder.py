@@ -93,7 +93,7 @@ class ViNTEncoder(nn.Module):
             # 目标编码转成单个 token：[B, 1, D]
             goal_encoding = goal_encoding.unsqueeze(1)
         if goal_encoding.shape[2] != self.goal_encoding_size:
-            raise ValueError(f"{goal_encoding.shape[2]} != {self.goal_encoding_size}")
+            raise ValueError(f"目标编码维度不匹配: {goal_encoding.shape[2]} != {self.goal_encoding_size}")
         return goal_encoding
 
     # 编码观测序列（多帧）

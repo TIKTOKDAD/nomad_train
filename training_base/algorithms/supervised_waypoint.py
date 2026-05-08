@@ -41,7 +41,7 @@ class SupervisedWaypointAlgorithm(Algorithm):
 
         # 约定从 logs/<load_run>/latest.pth 恢复，兼容旧版权重命名
         load_project_folder = os.path.join("logs", load_run)
-        print("Loading model from ", load_project_folder)
+        print("正在从以下目录加载模型: ", load_project_folder)
         latest_checkpoint = load_checkpoint(find_latest_checkpoint(load_project_folder), device)
         load_model_state(model, latest_checkpoint, strict=False, model_name=config["model"]["name"])
 
@@ -53,7 +53,7 @@ class SupervisedWaypointAlgorithm(Algorithm):
             optimizer.load_state_dict(optimizer_state)
         if scheduler is not None and scheduler_state is not None:
             scheduler.load_state_dict(scheduler_state)
-        print(f"Resuming training from epoch {current_epoch}")
+        print(f"从第 {current_epoch} 轮继续训练")
         global_step = latest_checkpoint.get("global_step", 0) if isinstance(latest_checkpoint, dict) else 0
         return ResumeState(current_epoch=current_epoch, latest_checkpoint=latest_checkpoint, load_project_folder=load_project_folder, extra={"global_step": global_step})
 
