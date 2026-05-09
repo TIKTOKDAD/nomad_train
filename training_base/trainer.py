@@ -62,6 +62,8 @@ class Trainer:
         heavy_freq = int(logging.get("heavy_metric_log_freq", print_freq)) if self.context.is_main_process else 0
         # 性能日志允许所有进程计算，但 Recorder/Sink 会按自身启用状态决定是否写出
         perf_freq = int(logging.get("perf_log_freq", 0))
+        optim_freq = int(logging.get("optim_log_freq", logging.get("metric_log_freq", 0))) if self.context.is_main_process else 0
+        param_norm_freq = int(logging.get("param_norm_log_freq", 0)) if self.context.is_main_process else 0
         log_by_global_step = bool(logging.get("by_global_step", True))
         log_first_step = bool(logging.get("first_step", False))
         image_start = int(logging.get("image_start_step", 0))
@@ -96,17 +98,29 @@ class Trainer:
 
                 # 反向传播 + 可选梯度裁剪 + 参数更新
                 # scale_backward_step 内部负责 zero_grad、GradScaler、clip_grad 和 optimizer.step
-                scale_backward_step(
+                should_optim_stats = should_log_event(optim_freq, epoch, num_batches, batch_idx, log_by_global_step, 0, log_first_step)
+                should_param_norm = should_log_event(param_norm_freq, epoch, num_batches, batch_idx, log_by_global_step, 0, log_first_step)
+                optimizer_stats = scale_backward_step(
                     result.loss,
                     optimizer,
                     grad_scaler,
                     model=model,
                     clip_config=config.get("optimizer", {}).get("gradient_clip", {}),
+                    collect_stats=should_optim_stats,
+                    collect_param_norm=should_param_norm,
                 )
                 self.algorithm.after_optimizer_step(model, state, config)
                 # 回调：允许外部逻辑在更新后介入
                 self.callbacks.call("after_optimizer_step", model=model, algorithm=self.algorithm, state=state, config=config)
                 self.global_step += 1
+                if should_optim_stats or should_param_norm:
+                    self.callbacks.call(
+                        "log_optimizer_step",
+                        recorder=self.recorder,
+                        optimizer=optimizer,
+                        stats=optimizer_stats,
+                        global_step=self.global_step,
+                    )
 
                 # 轻量指标日志
                 # 轻量指标只复用当前 step 已经算出的预测，不额外跑完整采样或可视化
@@ -176,6 +190,7 @@ class Trainer:
                         compute_time=compute_time,
                         step_time=step_time,
                         device=device,
+                        global_step=self.global_step,
                     )
                 end_time = time.perf_counter()
 
@@ -349,10 +364,8 @@ class Trainer:
                 if bool(runtime["train"]) and scheduler is not None:
                     self.algorithm.step_scheduler(scheduler, eval_summaries, self.config)
 
-                # 记录当前学习率
-                if self.context.is_main_process:
-                    # 学习率属于优化器/运行时状态，放在 runtime/optim 分区
-                    self.recorder.log_metrics({"runtime/optim/lr": optimizer.param_groups[0]["lr"]}, step=self.global_step, commit=False)
+                # 调度器可能在 epoch 末尾更新学习率，具体日志 key 与主进程判断由 optim_monitor 负责
+                self.callbacks.call("log_epoch_optimizer", recorder=self.recorder, optimizer=optimizer, global_step=self.global_step)
 
                 # 回调：epoch 结束
                 self.callbacks.call(

@@ -415,6 +415,10 @@ logging:
   image_start_step: 1000
   # 性能日志频率（步）
   perf_log_freq: 50
+  # 优化器健康日志频率（步）：记录 lr、grad_norm、AMP grad_scale
+  optim_log_freq: 100
+  # 参数范数日志频率（步）：0 表示默认关闭，诊断权重爆炸/塌缩时再开启
+  param_norm_log_freq: 0
   # 是否按 global_step 统计频率
   by_global_step: true
   # 是否在第 0 步也记录
@@ -453,3 +457,5 @@ callbacks:
     checkpoint_freq: 5
   # 性能监控回调
   - name: perf_monitor
+  # 优化器健康监控回调
+  - name: optim_monitor

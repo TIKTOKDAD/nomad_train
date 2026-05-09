@@ -6,6 +6,7 @@
 # 回调模块导出入口
 from training_base.callbacks.checkpoint import CheckpointCallback
 from training_base.callbacks.manager import CallbackManager
+from training_base.callbacks.optim_monitor import OptimMonitorCallback
 from training_base.callbacks.perf_monitor import PerfMonitorCallback
 
-__all__ = ["CheckpointCallback", "CallbackManager", "PerfMonitorCallback"]
+__all__ = ["CheckpointCallback", "CallbackManager", "OptimMonitorCallback", "PerfMonitorCallback"]

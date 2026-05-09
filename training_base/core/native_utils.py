@@ -7,11 +7,22 @@
 # 3. 分布式日志数值聚合和主进程广播
 
 from contextlib import nullcontext
-from typing import Dict
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 import numpy as np
 import torch
 import torch.distributed as dist
+
+
+@dataclass
+class OptimizerStepStats:
+    # grad_norm 是 unscale 后、clip 前的真实梯度范数，用于判断梯度爆炸/消失
+    grad_norm: Optional[float] = None
+    # param_norm 是 optimizer.step 后的参数范数，默认低频或关闭，避免热路径额外遍历参数
+    param_norm: Optional[float] = None
+    # AMP 开启时记录 GradScaler 当前 scale，便于排查溢出导致的 step skip
+    grad_scale: Optional[float] = None
 
 
 # 解除 DDP 包装，获取原始模型
@@ -61,19 +72,48 @@ def make_grad_scaler(device: torch.device, amp_enabled: bool, use_grad_scaler: b
 
 
 # 执行梯度裁剪（支持 norm/value 两种模式）
-def _clip_gradients(model, optimizer, grad_scaler, clip_config) -> None:
-    clip_config = clip_config or {}
-    if model is None or not bool(clip_config.get("enabled", False)):
-        return
-    # AMP 下必须先 unscale 梯度，再做真实梯度裁剪
-    if grad_scaler is not None and grad_scaler.is_enabled():
-        grad_scaler.unscale_(optimizer)
-    # 只收集有梯度且需要训练的参数，避免冻结参数或 None grad 干扰裁剪
-    params = [
+def _gradient_parameters(model):
+    if model is None:
+        return []
+    return [
         param
         for param in unwrap_model(model).parameters()
         if param.requires_grad and param.grad is not None
     ]
+
+
+def _trainable_parameters(model):
+    if model is None:
+        return []
+    return [param for param in unwrap_model(model).parameters() if param.requires_grad]
+
+
+def _tensor_list_norm(tensors, norm_type: float) -> Optional[float]:
+    tensors = [tensor.detach() for tensor in tensors if tensor is not None]
+    if not tensors:
+        return None
+    if norm_type == float("inf"):
+        return max(float(tensor.abs().max().item()) for tensor in tensors)
+    device = tensors[0].device
+    norms = [torch.norm(tensor, p=norm_type).to(device) for tensor in tensors]
+    return float(torch.norm(torch.stack(norms), p=norm_type).item())
+
+
+def _grad_norm(params, norm_type: float) -> Optional[float]:
+    return _tensor_list_norm([param.grad for param in params], norm_type)
+
+
+def _param_norm(model, norm_type: float) -> Optional[float]:
+    return _tensor_list_norm([param.data for param in _trainable_parameters(model)], norm_type)
+
+
+def _clip_gradients(model, clip_config, params=None) -> None:
+    clip_config = clip_config or {}
+    if model is None or not bool(clip_config.get("enabled", False)):
+        return
+    # AMP unscale 由 scale_backward_step 负责，这里只执行裁剪本身
+    # 只收集有梯度且需要训练的参数，避免冻结参数或 None grad 干扰裁剪
+    params = params if params is not None else _gradient_parameters(model)
     if not params:
         return
     mode = str(clip_config.get("mode", "norm")).lower()
@@ -98,20 +138,45 @@ def _clip_gradients(model, optimizer, grad_scaler, clip_config) -> None:
 
 
 # 反向传播 + 优化器更新，兼容 AMP 与梯度裁剪
-def scale_backward_step(loss, optimizer, grad_scaler=None, *, model=None, clip_config=None) -> None:
+def scale_backward_step(
+    loss,
+    optimizer,
+    grad_scaler=None,
+    *,
+    model=None,
+    clip_config=None,
+    collect_stats: bool = False,
+    collect_param_norm: bool = False,
+) -> OptimizerStepStats:
+    stats = OptimizerStepStats()
+    clip_config = clip_config or {}
+    norm_type = float(clip_config.get("norm_type", 2.0))
     # set_to_none=True 可减少显存写入，并让 PyTorch 对 None grad 做优化
     optimizer.zero_grad(set_to_none=True)
     if grad_scaler is not None and grad_scaler.is_enabled():
         # AMP 分支：scale loss -> backward -> unscale/clip -> scaler.step -> scaler.update
         grad_scaler.scale(loss).backward()
-        _clip_gradients(model, optimizer, grad_scaler, clip_config)
+        # unscale 必须只执行一次；真实 grad_norm 和 clip 都基于 unscale 后的梯度
+        grad_scaler.unscale_(optimizer)
+        grad_params = _gradient_parameters(model)
+        if collect_stats:
+            stats.grad_norm = _grad_norm(grad_params, norm_type)
+        _clip_gradients(model, clip_config, params=grad_params)
         grad_scaler.step(optimizer)
         grad_scaler.update()
+        if collect_stats:
+            stats.grad_scale = float(grad_scaler.get_scale())
     else:
         # 普通精度分支：直接 backward/clip/step
         loss.backward()
-        _clip_gradients(model, optimizer, grad_scaler, clip_config)
+        grad_params = _gradient_parameters(model)
+        if collect_stats:
+            stats.grad_norm = _grad_norm(grad_params, norm_type)
+        _clip_gradients(model, clip_config, params=grad_params)
         optimizer.step()
+    if collect_param_norm:
+        stats.param_norm = _param_norm(model, norm_type)
+    return stats
 
 
 # 计算日志事件步数（按 global_step 或 batch_idx）

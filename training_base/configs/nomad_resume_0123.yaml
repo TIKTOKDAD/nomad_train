@@ -138,3 +138,5 @@ callbacks:
     checkpoint_freq: 5
   # 性能监控回调
   - name: perf_monitor
+  # 优化器健康监控回调
+  - name: optim_monitor

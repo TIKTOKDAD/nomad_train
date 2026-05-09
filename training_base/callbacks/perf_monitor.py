@@ -37,7 +37,7 @@ class PerfMonitorCallback:
         recorder.log_metrics({key: value for key, value in data.items() if value is not None}, step=global_step, commit=False)
 
     # 记录训练热路径性能：频率由 Trainer 的 perf_log_freq 控制
-    def log_perf(self, *, recorder, mode, epoch, batch_idx, batch_size, data_time, compute_time, step_time, device) -> None:
+    def log_perf(self, *, recorder, mode, epoch, batch_idx, batch_size, data_time, compute_time, step_time, device, global_step) -> None:
         # step_time 可能非常小，max 避免除零导致无穷吞吐
         samples_per_sec = batch_size / max(step_time, 1e-12)
         data = {
@@ -55,4 +55,4 @@ class PerfMonitorCallback:
             data[f"{gpu_prefix}/memory_allocated_mb"] = torch.cuda.memory_allocated(device) / (1024 ** 2)
             data[f"{gpu_prefix}/memory_reserved_mb"] = torch.cuda.memory_reserved(device) / (1024 ** 2)
             data[f"{gpu_prefix}/max_memory_allocated_mb"] = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
-        recorder.log_metrics(data, commit=False)
+        recorder.log_metrics(data, step=global_step, commit=False)
