@@ -20,6 +20,7 @@ from training_base.core.checkpoint import (
     report_state_key_differences,
     strip_module_prefix,
 )
+from training_base.core.image_size import as_torch_resize_size
 from training_base.core.native_utils import unwrap_model
 from training_base.data.batch import split_and_transform_obs, transform_goal
 from training_base.data.data_utils import VISUALIZATION_IMAGE_SIZE
@@ -139,9 +140,9 @@ class NoMaDAlgorithm(Algorithm):
     # 准备 NoMaD batch：图像归一化、张量搬设备、可视化图保留原尺度
     def prepare_batch(self, batch, transform, device, mode: str, should_log_images: bool, config=None):
         obs_images = torch.split(batch.obs_image, 3, dim=1)
-        viz_size = tuple((config or {}).get("visualization", {}).get("image_size", VISUALIZATION_IMAGE_SIZE))
-        viz_obs = TF.resize(obs_images[-1], viz_size[::-1]) if should_log_images else None
-        viz_goal = TF.resize(batch.goal_image, viz_size[::-1]) if should_log_images else None
+        viz_size = as_torch_resize_size((config or {}).get("visualization", {}).get("image_size", VISUALIZATION_IMAGE_SIZE), "visualization.image_size")
+        viz_obs = TF.resize(obs_images[-1], viz_size) if should_log_images else None
+        viz_goal = TF.resize(batch.goal_image, viz_size) if should_log_images else None
         return {
             # NoMaD 视觉编码器仍接收按通道拼接的历史观测
             "obs": split_and_transform_obs(batch.obs_image, transform, device),

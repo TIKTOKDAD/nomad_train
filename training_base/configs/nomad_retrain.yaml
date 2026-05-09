@@ -411,7 +411,7 @@ logging:
       unit: step
     behavior:
       # train/behavior/uc 与 train/behavior/gc 的记录频率（步）
-      freq: 1000
+      freq: 100
       unit: step
       # behavior 指标会执行 diffusion sampling，训练早期默认跳过
       start_step: 1000
@@ -427,7 +427,7 @@ logging:
   eval:
     schedule:
       # 评估频率（epoch）
-      freq: 5
+      freq: 1
       unit: epoch
       # 评估子集比例
       fraction: 0.2
@@ -438,9 +438,9 @@ logging:
   # media 板块：训练图片和 eval 图片独立控制
   media:
     train:
-      freq: 2000
+      freq: 500
       unit: step
-      start_step: 1000
+      start_step: 500
     eval:
       trigger: eval
       freq: 1

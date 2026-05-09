@@ -26,8 +26,10 @@ class PerfMonitorCallback:
         schedules = build_logging_schedules(config.get("logging", {}))
         runtime = config["runtime"]
         data = {
-            "runtime/dataloader/train_num_workers": runtime.get("num_workers"),
-            "runtime/dataloader/test_num_workers": runtime.get("test_num_workers", runtime.get("num_workers")),
+            "runtime/dataloader/train_num_workers_configured": runtime.get("num_workers"),
+            "runtime/dataloader/train_num_workers_per_rank": runtime.get("num_workers_per_rank"),
+            "runtime/dataloader/test_num_workers_configured": runtime.get("test_num_workers", runtime.get("num_workers")),
+            "runtime/dataloader/test_num_workers_per_rank": runtime.get("test_num_workers_per_rank"),
             "runtime/dataloader/prefetch_factor": runtime.get("prefetch_factor"),
             "runtime/dataloader/persistent_workers": float(bool(runtime.get("persistent_workers", False))),
             "runtime/dataloader/pin_memory": float(bool(runtime.get("pin_memory", False))),

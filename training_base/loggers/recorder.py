@@ -37,6 +37,12 @@ class Recorder:
         for sink in self.sinks:
             sink.log_images(data, step=step, commit=commit)
 
+    def log_status(self, message: str) -> None:
+        for sink in self.sinks:
+            method = getattr(sink, "log_status", None)
+            if method is not None:
+                method(message)
+
     # 生成可被 sink 接受的图像对象
     def image(self, path):
         # 优先使用第一个支持 image() 的 sink，例如 WandB Image；没有则直接返回路径

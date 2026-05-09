@@ -6,6 +6,7 @@
 # 2. 设置 CUDA_VISIBLE_DEVICES、当前 device、cuDNN 策略和随机种子
 # 3. 封装 DDP 参数，禁止回退到单进程多 GPU DataParallel
 import inspect
+import logging
 import os
 import random
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # 运行时上下文：统一保存设备与分布式信息
@@ -210,11 +214,11 @@ def setup_runtime(config) -> RuntimeContext:
             device = torch.device("cuda", 0)
         if main:
             visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", ",".join(str(x) for x in gpu_ids))
-            print("使用 CUDA 设备:", visible_devices)
+            LOGGER.info("使用 CUDA 设备: %s", visible_devices)
     else:
         device = torch.device("cpu")
         if main:
-            print("使用 CPU")
+            LOGGER.info("使用 CPU")
 
     return RuntimeContext(
         device=device,

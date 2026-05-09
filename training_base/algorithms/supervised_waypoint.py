@@ -16,6 +16,7 @@ from training_base.core.checkpoint import (
     ResumeState,
     load_training_resume,
 )
+from training_base.core.image_size import as_torch_resize_size
 from training_base.data.batch import split_and_transform_obs, transform_goal
 from training_base.data.data_utils import VISUALIZATION_IMAGE_SIZE
 from training_base.models import build_model
@@ -50,7 +51,7 @@ class SupervisedWaypointAlgorithm(Algorithm):
     def prepare_batch(self, batch, transform, device, mode: str, should_log_images: bool, config=None):
         # obs_image 按通道拼了多帧，这里取最后一帧作为可视化观测图
         obs_images = torch.split(batch.obs_image, 3, dim=1)
-        viz_size = tuple((config or {}).get("visualization", {}).get("image_size", VISUALIZATION_IMAGE_SIZE))
+        viz_size = as_torch_resize_size((config or {}).get("visualization", {}).get("image_size", VISUALIZATION_IMAGE_SIZE), "visualization.image_size")
         viz_obs_image = TF.resize(obs_images[-1], viz_size) if should_log_images else None
         viz_goal_image = TF.resize(batch.goal_image, viz_size) if should_log_images else None
         return {

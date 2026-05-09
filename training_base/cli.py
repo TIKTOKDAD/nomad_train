@@ -9,6 +9,7 @@
 # 训练入口脚本：负责配置加载、运行时初始化、数据检查与训练流程启动。
 
 import os
+import logging
 import time
 
 import torch
@@ -18,7 +19,6 @@ from training_base.core.config import (
     build_arg_parser,
     load_config,
     run_config_artifact_paths,
-    safe_config_for_logging,
     save_run_configs,
 )
 from training_base.core.runtime import (
@@ -38,6 +38,7 @@ from training_base.trainer import Trainer
 # 工程根目录与默认配置目录（用于相对路径解析）
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "configs")
+LOGGER = logging.getLogger(__name__)
 
 
 # 解析配置文件路径：优先使用传入路径，其次尝试默认配置目录
@@ -90,24 +91,8 @@ def _prepare_project_folder(config, context) -> None:
 # 保存本次 run 的配置快照
 def _prepare_run_config_artifacts(config, context) -> None:
     runtime = config["runtime"]
-    paths = run_config_artifact_paths(runtime["project_folder"])
-    runtime["config_artifact_paths"] = paths
-    if context.is_main_process:
-        runtime["config_artifact_paths"] = save_run_configs(config, runtime["project_folder"])
+    runtime["config_artifact_paths"] = run_config_artifact_paths(runtime["project_folder"])
     barrier()
-
-
-# 为各日志 sink 填充统一的默认字段
-def _prepare_logging(config) -> None:
-    full_config = safe_config_for_logging(config)
-    for sink in config["logging"].get("sinks", []):
-        # sink 自己只读 logging 子配置，这里把 runtime/config 的全局信息补进去
-        sink.setdefault("project", config["runtime"]["project_name"])
-        sink.setdefault("run_name", config["runtime"]["run_name"])
-        sink.setdefault("config_path", config.get("config_path"))
-        sink.setdefault("config_artifact_paths", config["runtime"].get("config_artifact_paths", {}))
-        sink.setdefault("full_config", full_config)
-
 
 # 主流程：加载配置 -> 运行时初始化 -> 数据准备 -> 训练/构建缓存
 def main(argv=None) -> None:
@@ -134,11 +119,11 @@ def main(argv=None) -> None:
     setup_cudnn(config["runtime"])
     _prepare_project_folder(config, context)
     _prepare_run_config_artifacts(config, context)
-    _prepare_logging(config)
+    # Logging sinks are prepared by Trainer after DataModule writes effective runtime fields.
 
     # 主进程打印最终配置，便于复现实验
     if context.is_main_process:
-        print(config)
+        LOGGER.debug("resolved config will be saved after data setup")
 
     try:
         # 触发内置组件注册；build_lmdb_only 也可能需要通过 data_module_registry 构建数据模块
@@ -148,7 +133,8 @@ def main(argv=None) -> None:
             if not handle_build_lmdb_only(config, context):
                 raise RuntimeError("--build-lmdb-only 不支持当前配置的视觉导航数据流程。")
             if context.is_main_process:
-                print("LMDB 缓存构建完成")
+                config["runtime"]["config_artifact_paths"] = save_run_configs(config, config["runtime"]["project_folder"])
+                LOGGER.info("LMDB 缓存构建完成")
             return
 
         # 常规训练流程：构建算法与数据模块 -> 启动训练
@@ -158,7 +144,7 @@ def main(argv=None) -> None:
         datamodule = build_data_module(config, context)
         Trainer(config=config, algorithm=algorithm, datamodule=datamodule, context=context).fit()
         if context.is_main_process:
-            print("训练完成")
+            LOGGER.info("训练完成")
     finally:
         cleanup_distributed()
 

@@ -4,6 +4,7 @@
 # 本文件只处理图像缓存生命周期，不关心样本采样或训练标签。
 
 import json
+import logging
 import os
 import shutil
 from typing import List, Tuple
@@ -16,6 +17,7 @@ from training_base.data.indexing import get_dataset_index_path, load_expected_lm
 
 
 LMDB_CACHE_VERSION = 1
+LOGGER = logging.getLogger(__name__)
 
 
 def get_lmdb_cache_paths(data_split_folder: str, dataset_name: str) -> Tuple[str, str]:
@@ -208,7 +210,7 @@ def build_or_open_lmdb_cache(
             json.dump(marker, f, ensure_ascii=False, indent=2)
 
     elif should_build and cache_ready:
-        print(f"{dataset_name} 的 LMDB 缓存已完整: {cache_filename}")
+        LOGGER.info("%s 的 LMDB 缓存已完整: %s", dataset_name, cache_filename)
 
     return lmdb.open(
         cache_filename,

@@ -18,6 +18,11 @@ from training_base.core.runtime import RuntimeContext, barrier, is_torchrun, see
 from training_base.data.batch import navigation_collate
 from training_base.data.lmdb_cache import check_lmdb_cache_ready
 from training_base.data.navigation_dataset import NavigationDataset
+from training_base.data.navigation_factory import (
+    build_lmdb_cache_config,
+    build_navigation_dataset_spec,
+    load_navigation_data_config,
+)
 from training_base.data.sampling import (
     EpochAwareDataset,
     EpochAwareSampler,
@@ -216,6 +221,7 @@ class NavigationDataModule:
         self.test_dataloaders: Dict[str, DataLoader] = {}
         self.train_sampler = None
         self.train_dataset = None
+        self.loader_summary = None
 
     def set_train_epoch(self, epoch: int) -> None:
         if self.train_sampler is not None and hasattr(self.train_sampler, "set_epoch"):
@@ -250,6 +256,8 @@ class NavigationDataModule:
         data.setdefault("context_type", "temporal")
         data.setdefault("clip_goals", False)
         data.setdefault("module_name", "navigation")
+        data.setdefault("obs_type", "image")
+        data.setdefault("goal_type", "image")
 
     # 构建训练与测试数据集，并记录元数据
     def _build_datasets(self, build_lmdb_only: bool):
@@ -262,6 +270,8 @@ class NavigationDataModule:
         dataset_metadata_by_name = {}
         distributed_eval = bool(runtime.get("distributed_eval", False))
         lmdb_cache_mode = self._lmdb_cache_mode(build_lmdb_only)
+        all_data_config = load_navigation_data_config(data.get("data_config_path"))
+        cache_config = build_lmdb_cache_config(runtime, cache_mode=lmdb_cache_mode)
 
         # 非主进程等待主进程完成缓存或准备
         if self.context.distributed and not self.context.is_main_process:
@@ -285,34 +295,14 @@ class NavigationDataModule:
                 # 构建单个数据集实例
                 # 传入的距离/action 配置分别控制目标采样距离桶和动作损失有效区间
                 dataset = NavigationDataset(
-                    data_folder=data_config["data_folder"],
-                    data_split_folder=data_config[split],
-                    dataset_name=dataset_name,
-                    image_size=data["image_size"],
-                    waypoint_spacing=data_config["waypoint_spacing"],
-                    min_dist_cat=data["distance"]["min_dist_cat"],
-                    max_dist_cat=data["distance"]["max_dist_cat"],
-                    min_action_distance=data["action"]["min_dist_cat"],
-                    max_action_distance=data["action"]["max_dist_cat"],
-                    negative_mining=data_config["negative_mining"],
-                    len_traj_pred=data["len_traj_pred"],
-                    learn_angle=data["learn_angle"],
-                    context_size=data["context_size"],
-                    context_type=data.get("context_type", "temporal"),
-                    end_slack=data_config["end_slack"],
-                    goals_per_obs=data_config["goals_per_obs"],
-                    normalize=data["normalize"],
-                    goal_type=data["goal_type"],
-                    lmdb_lock=bool(runtime.get("lmdb_lock", False)),
-                    lmdb_readahead=bool(runtime.get("lmdb_readahead", False)),
-                    lmdb_meminit=bool(runtime.get("lmdb_meminit", False)),
-                    lmdb_max_readers=int(runtime.get("lmdb_max_readers", 512)),
-                    lmdb_map_size=int(runtime.get("lmdb_map_size", 2 ** 40)),
-                    lmdb_cache_mode=lmdb_cache_mode,
-                    rebuild_incomplete_lmdb=bool(runtime.get("rebuild_incomplete_lmdb", False)),
-                    data_config_path=data.get("data_config_path"),
-                    image_aspect_ratio=float(data.get("image_aspect_ratio", 4 / 3)),
-                    goal_sampling=data.get("goal_sampling"),
+                    spec=build_navigation_dataset_spec(
+                        data=data,
+                        dataset_config=data_config,
+                        dataset_name=dataset_name,
+                        split=split,
+                        all_data_config=all_data_config,
+                    ),
+                    cache_config=cache_config,
                 )
                 metadata = navigation_dataset_metadata(dataset)
                 # 按 dataset_index 和 dataset_name 各存一份，方便 batch 级查找或人工读日志
@@ -402,14 +392,14 @@ class NavigationDataModule:
         if not self.context.is_main_process:
             return
         runtime = self.config["runtime"]
-        print(
+        self.loader_summary = (
             "导航 DataLoader 配置: "
             f"global_batch_size={runtime['global_batch_size']}, "
             f"per_device_batch_size={runtime['per_device_batch_size']}, "
             f"eval_batch_size={runtime['eval_batch_size']}, "
             f"train_subset_size={runtime.get('train_subset_size')}/{runtime.get('train_subset_total_size')}, "
             f"train_num_workers_per_rank={train_num_workers}, "
-            f"test_num_workers={test_num_workers}, "
+            f"test_num_workers_per_rank={test_num_workers}, "
             f"distributed_eval={bool(runtime.get('distributed_eval', False))}, "
             f"pin_memory={pin_memory}"
         )
@@ -450,6 +440,7 @@ class NavigationDataModule:
         distributed_eval = bool(runtime.get("distributed_eval", False))
         # 评估 worker 可以独立配置，避免测试阶段和训练阶段吞吐需求绑定
         test_num_workers = workers_per_rank(runtime, self.context.distributed and distributed_eval, self.context.world_size, train=False)
+        runtime["test_num_workers_per_rank"] = int(test_num_workers)
         self._log_loader_summary(train_num_workers=train_num_workers, test_num_workers=test_num_workers, pin_memory=pin_memory)
         self._build_eval_loaders(
             test_datasets=test_datasets,

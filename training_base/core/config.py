@@ -15,6 +15,8 @@ from typing import Any, Dict, Sequence
 
 import yaml
 
+from training_base.core.image_size import as_width_height
+
 
 # 配置文件必须包含的顶层字段
 REQUIRED_SECTIONS = (
@@ -289,12 +291,14 @@ def validate_config(config: Dict[str, Any]) -> None:
     context_type = str(data.get("context_type", "temporal")).lower()
     if context_type != "temporal":
         raise ValueError("data.context_type 当前只支持 temporal")
+    obs_type = str(data.get("obs_type", "image")).lower()
+    goal_type = str(data.get("goal_type", "image")).lower()
+    if obs_type != "image":
+        raise ValueError("data.obs_type 当前只支持 image；新模态请注册新的 data.module_name")
+    if goal_type != "image":
+        raise ValueError("data.goal_type 当前只支持 image；新模态请注册新的 data.module_name")
     data["module_name"] = str(data.get("module_name", "navigation")).lower()
-    image_size = data.get("image_size")
-    if not isinstance(image_size, (list, tuple)) or len(image_size) != 2:
-        raise ValueError("data.image_size 必须是 [width, height]")
-    _validate_positive_int(image_size[0], "data.image_size[0]")
-    _validate_positive_int(image_size[1], "data.image_size[1]")
+    as_width_height(data.get("image_size"), "data.image_size")
     if float(data.get("image_aspect_ratio", 4 / 3)) <= 0:
         raise ValueError("data.image_aspect_ratio 必须大于 0")
     distance = data.get("distance", {})
@@ -308,11 +312,7 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("data.goal_sampling.negative.policy 当前只支持 offset_zero")
     if str(goal_negative.get("distance_label", "max_dist_cat")).lower() not in {"max_dist_cat", "minus_one"}:
         raise ValueError("data.goal_sampling.negative.distance_label 必须是 max_dist_cat 或 minus_one")
-    viz_size = config["visualization"].get("image_size", [160, 120])
-    if not isinstance(viz_size, (list, tuple)) or len(viz_size) != 2:
-        raise ValueError("visualization.image_size 必须是 [width, height]")
-    _validate_positive_int(viz_size[0], "visualization.image_size[0]")
-    _validate_positive_int(viz_size[1], "visualization.image_size[1]")
+    as_width_height(config["visualization"].get("image_size", [160, 120]), "visualization.image_size")
     if not config["optimizer"].get("name"):
         raise KeyError("必须配置 optimizer.name")
     if "lr" not in config["optimizer"]:
@@ -349,6 +349,8 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
     config["optimizer"]["name"] = str(config["optimizer"]["name"]).lower()
     config["data"]["context_type"] = str(config["data"].get("context_type", "temporal")).lower()
     config["data"]["module_name"] = str(config["data"].get("module_name", "navigation")).lower()
+    config["data"]["obs_type"] = str(config["data"].get("obs_type", "image")).lower()
+    config["data"]["goal_type"] = str(config["data"].get("goal_type", "image")).lower()
     config["data"]["goal_sampling"]["negative"]["policy"] = str(
         config["data"]["goal_sampling"]["negative"].get("policy", "offset_zero")
     ).lower()
@@ -378,6 +380,16 @@ def safe_config_for_logging(config: Dict[str, Any]) -> Dict[str, Any]:
     for sink in clean.get("logging", {}).get("sinks", []):
         sink.pop("full_config", None)
     return clean
+
+
+def prepare_logging_config(config: Dict[str, Any]) -> None:
+    full_config = safe_config_for_logging(config)
+    for sink in config["logging"].get("sinks", []):
+        sink["project"] = config["runtime"]["project_name"]
+        sink["run_name"] = config["runtime"]["run_name"]
+        sink["config_path"] = config.get("config_path")
+        sink["config_artifact_paths"] = config["runtime"].get("config_artifact_paths", {})
+        sink["full_config"] = full_config
 
 
 def run_config_artifact_paths(project_folder: str) -> Dict[str, str]:

@@ -14,8 +14,6 @@ from typing import Tuple
 import torch
 from torch.utils.data import Dataset
 
-import yaml
-
 # 导入数据处理工具函数
 from training_base.data.data_utils import (
     calculate_sin_cos,  # 将角度转换为sin/cos表示
@@ -27,6 +25,7 @@ from training_base.data.goal_sampling import (
     sample_navigation_goal,
 )
 from training_base.data.image_store import LmdbImageStore
+from training_base.data.navigation_spec import LmdbCacheConfig, NavigationDatasetSpec
 from training_base.data.indexing import (
     build_navigation_index,
     get_dataset_index_path,
@@ -42,36 +41,9 @@ from training_base.registry import dataset_registry
 class NavigationDataset(Dataset):
     def __init__(
             self,
-            data_folder: str,  # 包含所有图像数据的目录
-            # 结构: data_folder/trajectory_name/0.jpg, 1.jpg, ..., traj_data.pkl
-            data_split_folder: str,  # 包含traj_names.txt的数据划分目录
-            dataset_name: str,  # 数据集名称（用于查找data_config.yaml中的配置）
-            image_size: Tuple[int, int],  # 图像尺寸 (宽度, 高度)
-            waypoint_spacing: int,  # 航点间隔（帧数）
-            min_dist_cat: int,  # 最小距离类别（航点步）
-            max_dist_cat: int,  # 最大距离类别（航点步）
-            min_action_distance: int,  # 动作预测最小距离（航点步）
-            max_action_distance: int,  # 动作预测最大距离（航点步）
-            negative_mining: bool,  # 是否启用负样本相关逻辑
-            len_traj_pred: int,  # 预测轨迹长度（航点数量）
-            learn_angle: bool,  # 是否学习航向角
-            context_size: int,  # 历史上下文帧数
-            context_type: str = "temporal",  # 上下文类型：当前实现只支持 temporal
-            end_slack: int = 0,  # 轨迹末端忽略步数
-            goals_per_obs: int = 1,  # 每个观测采样目标数
-            normalize: bool = True,  # 是否按米制间隔归一化动作
-            obs_type: str = "image",  # 观测数据类型（目前仅支持image）
-            goal_type: str = "image",  # 目标数据类型（目前仅支持image）
-            lmdb_lock: bool = False,  # 多 worker 只读训练建议关闭锁，减少 LMDB 读锁竞争
-            lmdb_readahead: bool = False,  # 随机访问图像时关闭预读，避免无效磁盘/页缓存压力
-            lmdb_meminit: bool = False,  # 只读场景无需初始化内存页，可减少 LMDB 打开开销
-            lmdb_max_readers: int = 512,  # 允许更多 DataLoader worker 同时读取 LMDB
-            lmdb_map_size: int = 2 ** 40,  # LMDB 构建时的 map_size
-            lmdb_cache_mode: str = "auto",  # auto=缺失时构建；read=只读已完成缓存；build=只构建/补齐缓存
-            rebuild_incomplete_lmdb: bool = False,  # True 时删除未完成/不匹配的 LMDB 后重建
-            data_config_path: str = None,  # 数据集元信息配置；默认使用包内 data_config.yaml
-            image_aspect_ratio: float = 4 / 3,
-            goal_sampling: dict = None,
+            *,
+            spec: NavigationDatasetSpec,
+            cache_config: LmdbCacheConfig,
     ):
         """
         Navigation dataset class - used to train visual navigation models
@@ -145,14 +117,14 @@ class NavigationDataset(Dataset):
             goal_type (str): 目标数据类型（目前仅支持"image"）
         """
         # ========== 基本参数设置 ==========
-        # 记录数据根目录与划分目录
-        self.data_folder = data_folder
-        self.data_split_folder = data_split_folder
-        self.dataset_name = dataset_name
+        # DataModule 已经负责把 YAML/runtime 翻译成 spec；Dataset 只消费明确的构造契约。
+        self.data_folder = spec.data_folder
+        self.data_split_folder = spec.data_split_folder
+        self.dataset_name = spec.dataset_name
 
         # 读取轨迹名称列表（每行一个轨迹目录名）
-        traj_names_file = os.path.join(data_split_folder, "traj_names.txt")
-        with open(traj_names_file, "r") as f:
+        traj_names_file = os.path.join(self.data_split_folder, "traj_names.txt")
+        with open(traj_names_file, "r", encoding="utf-8") as f:
             file_lines = f.read()
             self.traj_names = file_lines.split("\n")
         # 移除末尾空行造成的空字符串
@@ -161,11 +133,11 @@ class NavigationDataset(Dataset):
 
         # ========== 距离和航点配置 ==========
         # 保存图像尺寸与航点间隔
-        self.image_size = image_size
-        self.waypoint_spacing = waypoint_spacing
+        self.image_size = spec.image_size
+        self.waypoint_spacing = spec.waypoint_spacing
         # 生成距离类别列表：[min_dist_cat, min_dist_cat+spacing, ..., max_dist_cat]
         self.distance_categories = list(
-            range(min_dist_cat, max_dist_cat + 1, self.waypoint_spacing)
+            range(spec.distance.min_dist_cat, spec.distance.max_dist_cat + 1, self.waypoint_spacing)
         )
         # 便于后续快速访问最小/最大距离桶
         self.min_dist_cat = self.distance_categories[0]
@@ -173,69 +145,57 @@ class NavigationDataset(Dataset):
 
         # ========== 负样本挖掘 ==========
         # negative_mining 控制是否加入“不可达”类别
-        self.negative_mining = negative_mining
+        self.negative_mining = spec.negative_mining
         if self.negative_mining:
             # 在距离类别中添加-1作为不可达类别标记（仅用于类别集合定义）
             self.distance_categories.append(-1)
 
         # ========== 轨迹预测参数 ==========
         # 预测未来轨迹长度与角度学习开关
-        self.len_traj_pred = len_traj_pred  # 预测的航点数量
-        self.learn_angle = learn_angle  # 是否学习航向角
+        self.len_traj_pred = spec.len_traj_pred  # 预测的航点数量
+        self.learn_angle = spec.learn_angle  # 是否学习航向角
 
         # ========== 动作距离范围 ==========
         # 控制训练动作标签的有效距离区间
-        self.min_action_distance = min_action_distance
-        self.max_action_distance = max_action_distance
+        self.min_action_distance = spec.action.min_dist_cat
+        self.max_action_distance = spec.action.max_dist_cat
 
         # ========== 上下文配置 ==========
         # context_size 为历史帧数量，context_type 控制采样策略
-        self.context_size = context_size
+        self.context_size = spec.context.context_size
+        context_type = spec.context.context_type
         if context_type != "temporal":
             raise ValueError(f"data.context_type 当前只支持 temporal，实际为 {context_type!r}")
         self.context_type = context_type
 
         # ========== 其他配置 ==========
         # 轨迹末端裁剪、目标数量与归一化配置
-        self.end_slack = end_slack  # 轨迹末端裁剪
-        self.goals_per_obs = goals_per_obs  # 每个观测的目标数
-        self.normalize = normalize  # 是否归一化
-        self.obs_type = obs_type  # 观测类型
-        self.goal_type = goal_type  # 目标类型
+        self.end_slack = spec.end_slack  # 轨迹末端裁剪
+        self.goals_per_obs = spec.goals_per_obs  # 每个观测的目标数
+        self.normalize = spec.normalize  # 是否归一化
+        self.obs_type = spec.obs_type  # 观测类型
+        self.goal_type = spec.goal_type  # 目标类型
+        if self.obs_type != "image":
+            raise ValueError(f"data.obs_type 当前只支持 image，实际为 {self.obs_type!r}")
+        if self.goal_type != "image":
+            raise ValueError(f"data.goal_type 当前只支持 image，实际为 {self.goal_type!r}")
         # LMDB 读取参数与缓存策略
-        self.lmdb_lock = lmdb_lock
-        self.lmdb_readahead = lmdb_readahead
-        self.lmdb_meminit = lmdb_meminit
-        self.lmdb_max_readers = lmdb_max_readers
-        self.lmdb_map_size = int(lmdb_map_size)
-        self.lmdb_cache_mode = str(lmdb_cache_mode).lower()
+        self.lmdb_lock = cache_config.lock
+        self.lmdb_readahead = cache_config.readahead
+        self.lmdb_meminit = cache_config.meminit
+        self.lmdb_max_readers = cache_config.max_readers
+        self.lmdb_map_size = int(cache_config.map_size)
+        self.lmdb_cache_mode = str(cache_config.cache_mode).lower()
         if self.lmdb_cache_mode not in {"auto", "read", "build"}:
             raise ValueError("lmdb_cache_mode 必须是 auto、read 或 build 之一")
-        self.rebuild_incomplete_lmdb = rebuild_incomplete_lmdb
-        self.image_aspect_ratio = float(image_aspect_ratio)
-        self.goal_sampling_config = normalize_goal_sampling_config(goal_sampling)
+        self.rebuild_incomplete_lmdb = cache_config.rebuild_incomplete
+        self.image_aspect_ratio = float(spec.image_aspect_ratio)
+        self.goal_sampling_config = normalize_goal_sampling_config(spec.goal_sampling)
 
-        # ========== 加载数据集配置 ==========
-        # data_config.yaml 记录每个数据集的统计信息
-        # 从data_config.yaml加载数据集特定参数（如metric_waypoint_spacing）
-        data_config_path = data_config_path or os.path.join(os.path.dirname(__file__), "data_config.yaml")
-        if not os.path.isabs(data_config_path):
-            data_config_path = os.path.abspath(data_config_path)
-        with open(data_config_path, "r", encoding="utf-8") as f:
-            all_data_config = yaml.safe_load(f)
-        if self.dataset_name not in all_data_config:
-            raise KeyError(f"在数据集配置 {data_config_path} 中找不到数据集 {self.dataset_name}")
-
-        # 获取数据集索引（用于多数据集训练时的标识）
-        dataset_names = list(all_data_config.keys())
-        # 排序确保 index 在不同机器上稳定
-        dataset_names.sort()
-
-        # dataset_index 用于可视化/日志区分来源
-        self.dataset_index = dataset_names.index(self.dataset_name)
-        self.data_config = all_data_config[self.dataset_name]
-        # metric_scale = 数据集单位距离 * waypoint_spacing
-        self.metric_scale = float(self.data_config.get("metric_waypoint_spacing", 1.0)) * float(self.waypoint_spacing)
+        # ========== 数据集元信息 ==========
+        self.dataset_index = int(spec.metadata.dataset_index)
+        self.data_config = dict(spec.metadata.data_config)
+        self.metric_scale = float(spec.metadata.metric_scale)
 
         # ========== 初始化缓存 ==========
         # trajectory_cache 用于重复访问时避免磁盘 IO

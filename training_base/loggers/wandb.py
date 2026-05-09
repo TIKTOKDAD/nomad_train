@@ -6,9 +6,13 @@
 # 2. 上传 CLI/core 已经准备好的配置 artifact，不直接解析训练配置路径
 # 3. 统一记录指标、图像，并把本地图像路径包装为 wandb.Image
 
+import logging
 import os
 
 from training_base.registry import log_sink_registry
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # 规范化配置 artifact 路径集合，兼容 dict/list/tuple 三种传入形式
@@ -27,12 +31,12 @@ def _save_config_artifact(wandb, path) -> None:
         return
     rel_path = os.path.relpath(abs_path, os.getcwd())
     if rel_path == os.pardir or rel_path.startswith(os.pardir + os.sep):
-        print(f"跳过 W&B 配置 artifact 上传，路径不在当前工作目录内: {abs_path}")
+        LOGGER.warning("跳过 W&B 配置 artifact 上传，路径不在当前工作目录内: %s", abs_path)
         return
     try:
         wandb.save(rel_path, policy="now")
     except Exception as exc:
-        print(f"跳过 W&B 配置 artifact 上传: {exc}")
+        LOGGER.warning("跳过 W&B 配置 artifact 上传: %s", exc)
 
 
 # 注册 W&B 日志输出
@@ -76,7 +80,7 @@ class WandBSink:
     def _handle_error(self, message: str, exc: Exception, *, disable: bool = True) -> None:
         if self.strict:
             raise RuntimeError(message) from exc
-        print(f"{message}，已跳过 W&B 日志: {exc}")
+        LOGGER.warning("%s，已跳过 W&B 日志: %s", message, exc)
         if disable:
             self.run = None
 

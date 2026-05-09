@@ -16,9 +16,11 @@ from unittest import mock
 
 import numpy as np
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
 from training_base.algorithms.base import Algorithm, StepResult
+from training_base.callbacks.perf_monitor import PerfMonitorCallback
 from training_base.core.checkpoint import ResumeState
 from training_base.core.checkpoint import (
     atomic_torch_save,
@@ -30,6 +32,7 @@ from training_base.core.checkpoint import (
 )
 from training_base.core.runtime import RuntimeContext
 from training_base.core.config import load_yaml, normalize_config
+from training_base.core.image_size import as_torch_resize_size
 from training_base.data import data_module as data_module_exports
 from training_base.data.data_module import resolve_data_runtime
 from training_base.data.goal_sampling import normalize_goal_sampling_config, sample_navigation_goal
@@ -316,6 +319,20 @@ class ConfigHardeningTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_config(config)
 
+    def test_rejects_non_image_obs_and_goal_type(self):
+        config = self._default_config()
+        config["data"]["obs_type"] = "state"
+        with self.assertRaises(ValueError):
+            normalize_config(copy.deepcopy(config))
+
+        config = self._default_config()
+        config["data"]["goal_type"] = "text"
+        with self.assertRaises(ValueError):
+            normalize_config(config)
+
+    def test_visualization_image_size_uses_width_height_config_order(self):
+        self.assertEqual(as_torch_resize_size([160, 120], "visualization.image_size"), (120, 160))
+
     def test_rejects_invalid_eval_fraction_and_amp_dtype(self):
         # eval fraction 和 AMP dtype 是运行时关键字段，非法值不应拖到训练中才报错
         config = self._default_config()
@@ -529,6 +546,33 @@ class _TinyTrainDataModule:
         self.epochs.append(epoch)
 
 
+class _ConfigMutatingDataModule:
+    def __init__(self, config):
+        self.config = config
+        self.setup_calls = 0
+        self.train_sampler = None
+        self.train_loader = []
+        self.test_dataloaders = {}
+        self.transform = None
+        self.loader_summary = "loader summary"
+
+    def setup(self, build_lmdb_only=False):
+        self.setup_calls += 1
+        runtime = self.config["runtime"]
+        runtime["per_device_batch_size"] = 7
+        runtime["num_workers_per_rank"] = 3
+        runtime["test_num_workers_per_rank"] = 2
+        self.config["data"]["dataset_metadata"] = {"0": {"dataset_name": "tiny"}}
+
+
+class _CaptureRecorder:
+    def __init__(self):
+        self.logged = {}
+
+    def log_metrics(self, data, *, step=None, commit=True):
+        self.logged.update(data)
+
+
 # resume 语义测试算法：恢复点到达目标 epoch 时 train_step 不应被调用
 class _ResumeOnlyAlgorithm(Algorithm):
     name = "dummy"
@@ -605,6 +649,17 @@ class _CheckpointResumeAlgorithm(Algorithm):
 
 # Trainer resume 语义测试：目标总 epoch 与 checkpoint current_epoch 的关系
 class ResumeSemanticsTest(unittest.TestCase):
+    def _context(self):
+        return RuntimeContext(
+            device=torch.device("cpu"),
+            distributed=False,
+            rank=0,
+            local_rank=0,
+            world_size=1,
+            is_main_process=True,
+            gpu_ids=[0],
+        )
+
     def test_resume_exits_when_current_epoch_reaches_target_total_epochs(self):
         # runtime.epochs 表示目标总轮数，不是 resume 后追加轮数
         config = load_yaml(os.path.join("training_base", "configs", "defaults.yaml"))
@@ -634,6 +689,31 @@ class ResumeSemanticsTest(unittest.TestCase):
         self.assertEqual(datamodule.setup_calls, 1)
         self.assertEqual(algorithm.train_calls, 0)
         self.assertEqual(trainer.global_step, 5)
+
+    def test_effective_config_is_saved_after_datamodule_setup(self):
+        config = load_yaml(os.path.join("training_base", "configs", "defaults.yaml"))
+        config["runtime"]["epochs"] = 1
+        config["runtime"]["gpu_ids"] = [0]
+        config["runtime"]["distributed"] = False
+        config["logging"]["sinks"] = []
+        config["callbacks"] = []
+
+        context = self._context()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config["runtime"]["project_folder"] = tmpdir
+            datamodule = _ConfigMutatingDataModule(config)
+            trainer = Trainer(config, _ResumeOnlyAlgorithm(current_epoch=1), datamodule, context)
+            trainer.fit()
+
+            resolved_path = os.path.join(tmpdir, "config.resolved.yaml")
+            with open(resolved_path, "r", encoding="utf-8") as f:
+                saved = yaml.safe_load(f)
+
+        self.assertEqual(datamodule.setup_calls, 1)
+        self.assertEqual(saved["runtime"]["per_device_batch_size"], 7)
+        self.assertEqual(saved["runtime"]["num_workers_per_rank"], 3)
+        self.assertEqual(saved["runtime"]["test_num_workers_per_rank"], 2)
+        self.assertEqual(saved["data"]["dataset_metadata"], {"0": {"dataset_name": "tiny"}})
 
     def test_two_epoch_checkpoint_resume_continues_one_more_epoch(self):
         # 从 2 epoch checkpoint 恢复到 runtime.epochs=3 时，只应继续训练第 3 轮
@@ -684,6 +764,36 @@ class ResumeSemanticsTest(unittest.TestCase):
 
 
 # W&B sink 降级行为测试
+class PerfMonitorTest(unittest.TestCase):
+    def test_runtime_config_logs_configured_and_effective_workers(self):
+        context = RuntimeContext(
+            device=torch.device("cpu"),
+            distributed=False,
+            rank=0,
+            local_rank=0,
+            world_size=1,
+            is_main_process=True,
+            gpu_ids=[0],
+        )
+        config = {
+            "runtime": {
+                "num_workers": 8,
+                "num_workers_per_rank": 4,
+                "test_num_workers": 2,
+                "test_num_workers_per_rank": 1,
+                "amp": False,
+            },
+            "logging": {},
+        }
+        recorder = _CaptureRecorder()
+        PerfMonitorCallback({}, context).log_runtime_config(recorder=recorder, config=config, global_step=0)
+
+        self.assertEqual(recorder.logged["runtime/dataloader/train_num_workers_configured"], 8)
+        self.assertEqual(recorder.logged["runtime/dataloader/train_num_workers_per_rank"], 4)
+        self.assertEqual(recorder.logged["runtime/dataloader/test_num_workers_configured"], 2)
+        self.assertEqual(recorder.logged["runtime/dataloader/test_num_workers_per_rank"], 1)
+
+
 class WandBSinkTest(unittest.TestCase):
     def test_disabled_wandb_does_not_import(self):
         # disabled sink 不应导入 wandb，方便无 wandb 环境运行测试

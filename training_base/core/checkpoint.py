@@ -7,6 +7,7 @@
 # 3. 对旧版 GNM/ViNT/NoMaD 权重提供显式开关控制的 key 重映射
 
 from dataclasses import dataclass
+import logging
 import os
 import random
 import warnings
@@ -17,6 +18,7 @@ import torch
 
 
 CHECKPOINT_SCHEMA_VERSION = 1
+LOGGER = logging.getLogger(__name__)
 
 
 # 训练恢复结果：Trainer/Algorithm 根据这里的信息决定从哪里继续
@@ -162,7 +164,7 @@ def remap_legacy_state_dict(model_name: Optional[str], state_dict: dict) -> dict
     if changed:
         preview = ", ".join(f"{old} -> {new}" for old, new in changed[:8])
         suffix = "" if len(changed) <= 8 else f" ... (另有 {len(changed) - 8} 个)"
-        print(f"已应用旧版 {model_name} 检查点的键重映射：{preview}{suffix}")
+        LOGGER.info("已应用旧版 %s 检查点的键重映射：%s%s", model_name, preview, suffix)
     return remapped
 
 
@@ -171,10 +173,11 @@ def report_state_key_differences(incompatible, label: str = "检查点模型状�
     missing = list(getattr(incompatible, "missing_keys", []))
     unexpected = list(getattr(incompatible, "unexpected_keys", []))
     if missing or unexpected:
-        print(
-            f"{label} 加载后存在键差异：\n"
-            f"  缺失键: {_format_keys(missing)}\n"
-            f"  多余键: {_format_keys(unexpected)}"
+        LOGGER.warning(
+            "%s 加载后存在键差异：\n  缺失键: %s\n  多余键: %s",
+            label,
+            _format_keys(missing),
+            _format_keys(unexpected),
         )
 
 
@@ -294,7 +297,7 @@ def load_training_resume(
         # 没配置恢复路径时返回空状态，训练从头开始
         return ResumeState(extra={"global_step": 0})
 
-    print("正在从检查点恢复训练:", checkpoint_path)
+    LOGGER.info("正在从检查点恢复训练: %s", checkpoint_path)
     latest_checkpoint = load_checkpoint(checkpoint_path, device)
     strict, allow_legacy_remap = _resume_flags(config, latest_checkpoint)
     load_model_state(
@@ -316,7 +319,7 @@ def load_training_resume(
         scheduler.load_state_dict(scheduler_state)
 
     global_step = latest_checkpoint.get("global_step", 0) if is_training_checkpoint else 0
-    print(f"从第 {current_epoch} 轮继续训练")
+    LOGGER.info("从第 %s 轮继续训练", current_epoch)
     return ResumeState(
         current_epoch=current_epoch,
         latest_checkpoint=latest_checkpoint,

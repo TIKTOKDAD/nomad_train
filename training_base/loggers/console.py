@@ -22,6 +22,10 @@ class ConsoleSink:
     def log_images(self, data, *, step=None, commit=False) -> None:
         return None
 
+    def log_status(self, message: str) -> None:
+        if self.enabled:
+            print(message)
+
     # 关闭占位
     def close(self) -> None:
         return None

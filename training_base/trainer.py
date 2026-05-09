@@ -14,6 +14,7 @@ import tqdm
 
 from training_base.callbacks import CallbackManager
 from training_base.core.checkpoint import restore_rng_state
+from training_base.core.config import prepare_logging_config, save_run_configs
 from training_base.loggers import Recorder
 from training_base.loggers.key_format import format_metric_logs
 from training_base.loggers.metric_store import reduce_metric_logs_distributed
@@ -42,9 +43,20 @@ class Trainer:
         self.context = context
         # global_step 用于日志横轴；断点恢复后会从 checkpoint 中恢复
         self.global_step = 0
-        self.recorder = Recorder(config, context)
-        self.callbacks = CallbackManager(config, context)
+        self.recorder = None
+        self.callbacks = None
         self._prepare_batch_accepts_config = "config" in inspect.signature(self.algorithm.prepare_batch).parameters
+
+    def _save_effective_config(self) -> None:
+        runtime = self.config["runtime"]
+        if self.context.is_main_process:
+            runtime["config_artifact_paths"] = save_run_configs(self.config, runtime["project_folder"])
+        distributed_barrier()
+
+    def _init_services(self) -> None:
+        prepare_logging_config(self.config)
+        self.recorder = Recorder(self.config, self.context)
+        self.callbacks = CallbackManager(self.config, self.context)
 
     # 将聚合后的指标打印到控制台（仅主进程）
     def _print_store(self, store, mode: str, epoch: int, batch_idx: int, num_batches: int) -> None:
@@ -52,7 +64,7 @@ class Trainer:
             return
         message = store.display_latest()
         if message:
-            print(f"(轮次 {epoch}) (批次 {batch_idx}/{num_batches - 1}) {mode}: {message}")
+            self.recorder.log_status(f"(轮次 {epoch}) (批次 {batch_idx}/{num_batches - 1}) {mode}: {message}")
 
     def _run_train_step(
         self,
@@ -450,6 +462,11 @@ class Trainer:
     def fit(self) -> None:
         # setup 会构建 Dataset/DataLoader，并把 dataset_metadata 写回 config["data"]
         self.datamodule.setup(build_lmdb_only=False)
+        self._save_effective_config()
+        self._init_services()
+        loader_summary = getattr(self.datamodule, "loader_summary", None)
+        if loader_summary:
+            self.recorder.log_status(loader_summary)
         runtime = self.config["runtime"]
         schedules = build_logging_schedules(self.config["logging"])
         # system/runtime 静态配置交给性能回调记录，Trainer 只负责触发生命周期 hook
@@ -482,7 +499,7 @@ class Trainer:
         try:
             if resume_state.current_epoch >= end_epoch:
                 if self.context.is_main_process:
-                    print(
+                    self.recorder.log_status(
                         f"恢复点已经到达目标训练轮次: current_epoch={resume_state.current_epoch}, "
                         f"runtime.epochs={end_epoch}。无需继续训练。"
                     )
@@ -500,7 +517,7 @@ class Trainer:
                 # 训练阶段
                 if bool(runtime["train"]):
                     if self.context.is_main_process:
-                        print(f"开始 {self.algorithm.name} 训练轮次 {epoch}/{end_epoch - 1}")
+                        self.recorder.log_status(f"开始 {self.algorithm.name} 训练轮次 {epoch}/{end_epoch - 1}")
                     self._train_epoch(
                         model=model,
                         optimizer=optimizer,
@@ -525,7 +542,7 @@ class Trainer:
                         self.datamodule.set_eval_epoch(eval_index)
                     for dataset_type, loader in self.datamodule.test_dataloaders.items():
                         if self.context.is_main_process:
-                            print(f"开始 {dataset_type} 测试轮次 {epoch}/{end_epoch - 1}")
+                            self.recorder.log_status(f"开始 {dataset_type} 测试轮次 {epoch}/{end_epoch - 1}")
                         eval_summaries[dataset_type] = self._evaluate(
                             eval_type=dataset_type,
                             model=model,
@@ -565,6 +582,7 @@ class Trainer:
                 # 进程同步，避免不同步进入下一轮
                 distributed_barrier()
         finally:
-            self.callbacks.close()
-            if self.context.is_main_process:
+            if self.callbacks is not None:
+                self.callbacks.close()
+            if self.context.is_main_process and self.recorder is not None:
                 self.recorder.close()
