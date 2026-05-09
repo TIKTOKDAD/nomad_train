@@ -4,7 +4,7 @@
 # 本文件只负责记录优化器和模型健康状态，不参与训练数学：
 # 1. log_optimizer_step 记录 step 级 lr、grad_norm、GradScaler scale 和可选 param_norm
 # 2. log_epoch_optimizer 在调度器更新后记录 epoch 级学习率
-# 3. 这些日志属于 runtime/optim 与 runtime/model 分区，不放进算法或可视化模块
+# 3. 这些日志属于 train/optim 与 train/model 分区，不放进算法或可视化模块
 
 from training_base.registry import callback_registry
 
@@ -20,24 +20,24 @@ class OptimMonitorCallback:
     def _learning_rate_logs(self, optimizer) -> dict:
         if optimizer is None or not optimizer.param_groups:
             return {}
-        logs = {"runtime/optim/lr": optimizer.param_groups[0].get("lr")}
+        logs = {"train/optim/lr": optimizer.param_groups[0].get("lr")}
         if len(optimizer.param_groups) > 1:
             for index, group in enumerate(optimizer.param_groups):
-                logs[f"runtime/optim/lr_group_{index}"] = group.get("lr")
+                logs[f"train/optim/lr_group_{index}"] = group.get("lr")
         return {key: value for key, value in logs.items() if value is not None}
 
-    # 记录一次 optimizer step 的健康指标，频率由 Trainer 根据 logging.optim_log_freq 控制
+    # 记录一次 optimizer step 的健康指标，频率由 Trainer 的 logging schedule 控制
     def log_optimizer_step(self, *, recorder, optimizer, stats, global_step) -> None:
         if not self.context.is_main_process:
             return
         data = self._learning_rate_logs(optimizer)
         if stats is not None:
             if stats.grad_norm is not None:
-                data["runtime/optim/grad_norm"] = stats.grad_norm
+                data["train/optim/grad_norm"] = stats.grad_norm
             if stats.grad_scale is not None:
-                data["runtime/optim/grad_scale"] = stats.grad_scale
+                data["train/optim/grad_scale"] = stats.grad_scale
             if stats.param_norm is not None:
-                data["runtime/model/param_norm"] = stats.param_norm
+                data["train/model/param_norm"] = stats.param_norm
         if data:
             recorder.log_metrics(data, step=global_step, commit=False)
 

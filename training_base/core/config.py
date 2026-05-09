@@ -11,7 +11,7 @@ import argparse
 import os
 import shutil
 from copy import deepcopy
-from typing import Any, Dict
+from typing import Any, Dict, Sequence
 
 import yaml
 
@@ -30,6 +30,129 @@ REQUIRED_SECTIONS = (
     "callbacks",
     "algorithm",
 )
+
+
+LEGACY_LOGGING_FIELD_PATHS = (
+    ("metric_log_freq", ("train", "metrics", "freq")),
+    ("heavy_metric_log_freq", ("train", "behavior", "freq")),
+    ("heavy_metric_start_step", ("train", "behavior", "start_step")),
+    ("image_log_freq", ("media", "train", "freq")),
+    ("image_start_step", ("media", "train", "start_step")),
+    ("perf_log_freq", ("runtime", "perf", "freq")),
+    ("optim_log_freq", ("train", "optim", "freq")),
+    ("param_norm_log_freq", ("train", "param_norm", "freq")),
+    ("eval_freq", ("eval", "schedule", "freq")),
+    ("eval_fraction", ("eval", "schedule", "fraction")),
+    ("by_global_step", ("step", "by_global_step")),
+    ("first_step", ("step", "first_step")),
+)
+
+
+LEGACY_RUNTIME_LOGGING_FIELD_PATHS = (
+    ("eval_freq", ("eval", "schedule", "freq")),
+    ("eval_fraction", ("eval", "schedule", "fraction")),
+)
+
+
+def _set_nested_if_missing(mapping: Dict[str, Any], path: Sequence[str], value: Any) -> None:
+    current = mapping
+    for key in path[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            current[key] = child
+        current = child
+    current.setdefault(path[-1], value)
+
+
+def _pop_nested(mapping: Dict[str, Any], path: Sequence[str]) -> Any:
+    current = mapping
+    for key in path[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            return None
+        current = child
+    return current.pop(path[-1], None)
+
+
+def _nested_get(mapping: Dict[str, Any], path: Sequence[str]) -> Any:
+    current: Any = mapping
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
+
+
+def _prune_empty_dicts(mapping: Dict[str, Any]) -> None:
+    for key, value in list(mapping.items()):
+        if isinstance(value, dict):
+            _prune_empty_dicts(value)
+            if not value:
+                mapping.pop(key)
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _move_nested_fields(mapping: Dict[str, Any], source: Sequence[str], target: Sequence[str], fields: Sequence[str], default_unit: str = "step") -> None:
+    moved = False
+    for field in fields:
+        value = _pop_nested(mapping, tuple(source) + (field,))
+        if value is not None:
+            _set_nested_if_missing(mapping, tuple(target) + (field,), value)
+            moved = True
+    if moved and _nested_get(mapping, tuple(target) + ("unit",)) is None:
+        _set_nested_if_missing(mapping, tuple(target) + ("unit",), default_unit)
+
+
+def _upgrade_nested_logging_config(logging_config: Dict[str, Any]) -> None:
+    # 旧版 nested runtime/optim 属于训练健康指标，迁到 train/optim 和 train/model 分区
+    _move_nested_fields(logging_config, ("runtime", "optim"), ("train", "optim"), ("freq", "unit"))
+    _move_nested_fields(logging_config, ("runtime", "param_norm"), ("train", "param_norm"), ("freq", "unit"))
+
+    # 旧版 eval.behavior_every_eval 是布尔保底策略；新版用 unit=eval 的频率表达
+    eval_every = logging_config.pop("eval_heavy_every_eval", None)
+    nested_eval = logging_config.get("eval")
+    if isinstance(nested_eval, dict):
+        nested_value = nested_eval.pop("behavior_every_eval", None)
+        if eval_every is None:
+            eval_every = nested_value
+    if eval_every is not None:
+        _set_nested_if_missing(logging_config, ("eval", "behavior", "freq"), 1 if _coerce_bool(eval_every) else 0)
+        _set_nested_if_missing(logging_config, ("eval", "behavior", "unit"), "eval")
+
+    # 旧版 GPU 显存开关挂在 runtime.perf 下；新版 system.gpu 可独立控制
+    include_gpu_memory = _pop_nested(logging_config, ("runtime", "perf", "include_gpu_memory"))
+    if include_gpu_memory is not None:
+        _set_nested_if_missing(logging_config, ("system", "gpu", "enabled"), _coerce_bool(include_gpu_memory))
+        perf_freq = _nested_get(logging_config, ("runtime", "perf", "freq"))
+        if perf_freq is not None:
+            _set_nested_if_missing(logging_config, ("system", "gpu", "freq"), perf_freq)
+        _set_nested_if_missing(logging_config, ("system", "gpu", "unit"), "step")
+
+    _prune_empty_dicts(logging_config)
+
+
+def upgrade_logging_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    # 兼容旧版 logging/runtime 字段：加载时迁移到按 W&B 板块分组的新结构
+    upgraded = deepcopy(config)
+    logging_config = upgraded.get("logging")
+    if not isinstance(logging_config, dict):
+        return upgraded
+    for legacy_key, path in LEGACY_LOGGING_FIELD_PATHS:
+        if legacy_key in logging_config:
+            _set_nested_if_missing(logging_config, path, logging_config.pop(legacy_key))
+    runtime_config = upgraded.get("runtime")
+    if isinstance(runtime_config, dict):
+        for legacy_key, path in LEGACY_RUNTIME_LOGGING_FIELD_PATHS:
+            if legacy_key in runtime_config:
+                _set_nested_if_missing(logging_config, path, runtime_config.pop(legacy_key))
+    _upgrade_nested_logging_config(logging_config)
+    return upgraded
 
 
 # 读取 YAML 配置文件，空文件返回空字典
@@ -93,8 +216,8 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
 # 加载默认配置与用户配置并合并
 def load_config(default_path: str, user_path: str) -> Dict[str, Any]:
-    default_config = load_yaml(default_path)
-    user_config = load_yaml(user_path)
+    default_config = upgrade_logging_config(load_yaml(default_path))
+    user_config = upgrade_logging_config(load_yaml(user_path))
     config = deep_merge(default_config, user_config)
     # 记录用户配置路径，日志 sink 可上传/保存该文件以便复现实验
     config["config_path"] = user_path

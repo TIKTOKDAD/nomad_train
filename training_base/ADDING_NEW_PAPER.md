@@ -628,11 +628,52 @@ metrics:
   heavy: []
 
 logging:
-  metric_log_freq: 100
-  image_log_freq: 1000
-  heavy_metric_log_freq: 1000
-  image_start_step: 1000
-  by_global_step: true
+  step:
+    by_global_step: true
+    first_step: false
+  train:
+    metrics:
+      freq: 100
+      unit: step
+    behavior:
+      freq: 1000
+      unit: step
+      start_step: 1000
+    optim:
+      freq: 100
+      unit: step
+    param_norm:
+      freq: 0
+      unit: step
+  eval:
+    schedule:
+      freq: 1
+      unit: epoch
+      fraction: 0.25
+    behavior:
+      freq: 1
+      unit: eval
+  media:
+    train:
+      freq: 1000
+      unit: step
+      start_step: 1000
+    eval:
+      trigger: eval
+      freq: 1
+      unit: eval
+      policy: last_batch_per_eval
+  runtime:
+    perf:
+      freq: 50
+      unit: step
+  system:
+    gpu:
+      enabled: true
+      freq: 50
+      unit: step
+    ddp:
+      log_once: true
   sinks:
     - name: console
 
@@ -648,6 +689,7 @@ callbacks:
     save_latest_every_epoch: true
     checkpoint_freq: 5
   - name: perf_monitor
+  - name: optim_monitor
 ```
 
 ### 4.7 运行命令
@@ -835,7 +877,7 @@ def final_waypoint_l2(pred, target, mask):
     ...
 ```
 
-昂贵 metric 放在 `metrics.heavy`，例如需要 diffusion reverse process、多次采样或完整行为模拟。`Trainer` 会用 `heavy_metric_log_freq` 控制频率。
+昂贵 metric 放在 `metrics.heavy`，例如需要 diffusion reverse process、多次采样或完整行为模拟。`Trainer` 会用 `logging.train.behavior.freq` 控制频率。
 
 可视化器适合只做“把 algorithm 已经准备好的张量画出来”。不要在 visualizer 里重新读 YAML、重新构建 Dataset 或重新 forward 模型。
 

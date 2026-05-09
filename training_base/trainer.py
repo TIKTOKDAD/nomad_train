@@ -14,13 +14,13 @@ import tqdm
 from training_base.callbacks import CallbackManager
 from training_base.loggers import Recorder
 from training_base.loggers.key_format import format_metric_logs
+from training_base.loggers.schedule import build_logging_schedules
 from training_base.core.native_utils import (
     autocast,
     distributed_barrier,
     make_grad_scaler,
     rank0_tqdm_enabled,
     scale_backward_step,
-    should_log_event,
 )
 from training_base.core.runtime import RuntimeContext, wrap_distributed_model
 
@@ -55,19 +55,8 @@ class Trainer:
         model.train()
         runtime = config["runtime"]
         logging = config["logging"]
+        schedules = build_logging_schedules(logging)
         num_batches = len(dataloader)
-        # 只让主进程负责普通日志和图片，避免 DDP 多进程重复写入
-        print_freq = int(logging.get("metric_log_freq", 0)) if self.context.is_main_process else 0
-        image_freq = int(logging.get("image_log_freq", 0)) if self.context.is_main_process else 0
-        heavy_freq = int(logging.get("heavy_metric_log_freq", print_freq)) if self.context.is_main_process else 0
-        # 性能日志允许所有进程计算，但 Recorder/Sink 会按自身启用状态决定是否写出
-        perf_freq = int(logging.get("perf_log_freq", 0))
-        optim_freq = int(logging.get("optim_log_freq", logging.get("metric_log_freq", 0))) if self.context.is_main_process else 0
-        param_norm_freq = int(logging.get("param_norm_log_freq", 0)) if self.context.is_main_process else 0
-        log_by_global_step = bool(logging.get("by_global_step", True))
-        log_first_step = bool(logging.get("first_step", False))
-        image_start = int(logging.get("image_start_step", 0))
-        heavy_start = int(logging.get("heavy_metric_start_step", 0))
 
         # 轻量指标与重指标分别统计，避免重计算影响日志频率
         metric_store = self.recorder.metric_store()
@@ -88,7 +77,7 @@ class Trainer:
                 data_time = time.perf_counter() - end_time
                 compute_start = time.perf_counter()
                 # should_images 同时控制 batch 准备是否保留 CPU 可视化图，避免每步都 resize
-                should_images = should_log_event(image_freq, epoch, num_batches, batch_idx, log_by_global_step, image_start, log_first_step)
+                should_images = self.context.is_main_process and schedules.should_log(schedules.media_train, epoch, num_batches, batch_idx)
                 # 数据准备由算法自行处理（如张量化、归一化、标签构造）
                 prepared = self.algorithm.prepare_batch(batch, transform, device, mode="train", should_log_images=should_images)
 
@@ -98,8 +87,18 @@ class Trainer:
 
                 # 反向传播 + 可选梯度裁剪 + 参数更新
                 # scale_backward_step 内部负责 zero_grad、GradScaler、clip_grad 和 optimizer.step
-                should_optim_stats = should_log_event(optim_freq, epoch, num_batches, batch_idx, log_by_global_step, 0, log_first_step)
-                should_param_norm = should_log_event(param_norm_freq, epoch, num_batches, batch_idx, log_by_global_step, 0, log_first_step)
+                should_optim_stats = self.context.is_main_process and schedules.should_log(
+                    schedules.train_optim,
+                    epoch,
+                    num_batches,
+                    batch_idx,
+                )
+                should_param_norm = self.context.is_main_process and schedules.should_log(
+                    schedules.train_param_norm,
+                    epoch,
+                    num_batches,
+                    batch_idx,
+                )
                 optimizer_stats = scale_backward_step(
                     result.loss,
                     optimizer,
@@ -124,7 +123,7 @@ class Trainer:
 
                 # 轻量指标日志
                 # 轻量指标只复用当前 step 已经算出的预测，不额外跑完整采样或可视化
-                if should_log_event(print_freq, epoch, num_batches, batch_idx, log_by_global_step, 0, log_first_step):
+                if self.context.is_main_process and schedules.should_log(schedules.train_metrics, epoch, num_batches, batch_idx):
                     metric_logs = dict(result.logs)
                     metric_logs.update(self.algorithm.light_metrics(model, prepared, result, state, config, mode="train"))
                     metric_store.update(metric_logs)
@@ -140,7 +139,7 @@ class Trainer:
 
                 # 重计算指标日志（推理模式）
                 # NoMaD 行为指标等会执行反向扩散采样，因此用独立频率 heavy_freq 控制
-                if should_log_event(heavy_freq, epoch, num_batches, batch_idx, log_by_global_step, heavy_start, log_first_step):
+                if self.context.is_main_process and schedules.should_log(schedules.train_behavior, epoch, num_batches, batch_idx):
                     with torch.inference_mode():
                         metric_model = self.algorithm.model_for_eval(model, state)
                         metric_logs = self.algorithm.heavy_metrics(metric_model, prepared, state, config, mode="train")
@@ -178,7 +177,7 @@ class Trainer:
                 step_time = data_time + compute_time
                 # 性能监控回调：数据/计算/步长耗时
                 # data_time 近似 DataLoader 等待时间，compute_time 包含 prepare_batch 之后的训练计算
-                if should_log_event(perf_freq, epoch, num_batches, batch_idx, log_by_global_step, 0, log_first_step):
+                if schedules.should_log(schedules.runtime_perf, epoch, num_batches, batch_idx):
                     self.callbacks.call(
                         "log_perf",
                         recorder=self.recorder,
@@ -192,23 +191,32 @@ class Trainer:
                         device=device,
                         global_step=self.global_step,
                     )
+                if schedules.should_system_gpu(epoch, num_batches, batch_idx):
+                    self.callbacks.call(
+                        "log_system_gpu",
+                        recorder=self.recorder,
+                        device=device,
+                        global_step=self.global_step,
+                    )
                 end_time = time.perf_counter()
 
     # 评估流程：支持部分采样评估与重指标汇总
-    def _evaluate(self, *, eval_type, model, dataloader, transform, device, project_folder, config, epoch, distributed, state):
+    def _evaluate(self, *, eval_type, model, dataloader, transform, device, project_folder, config, epoch, eval_index, distributed, state):
         # 评估模型可能是 EMA averaged_model，也可能是 unwrap 后的即时模型
         eval_model = self.algorithm.model_for_eval(model, state)
         eval_model.eval()
         runtime = config["runtime"]
         logging = config["logging"]
-        heavy_freq = int(logging.get("heavy_metric_log_freq", logging.get("metric_log_freq", 0)))
-        heavy_start = int(logging.get("heavy_metric_start_step", 0))
-        eval_heavy_every_eval = bool(logging.get("eval_heavy_every_eval", True))
-        log_by_global_step = bool(logging.get("by_global_step", True))
-        log_first_step = bool(logging.get("first_step", False))
+        schedules = build_logging_schedules(logging)
         dataloader_len = len(dataloader)
-        # eval_fraction 允许只评估一部分 batch，最少保留 1 个 batch，避免空评估
-        num_batches = min(max(int(dataloader_len * float(runtime["eval_fraction"])), 1), dataloader_len) if dataloader_len > 0 else 0
+        # logging.eval.schedule.fraction 允许只评估一部分 batch，最少保留 1 个 batch，避免空评估
+        num_batches = min(max(int(dataloader_len * float(schedules.eval_fraction)), 1), dataloader_len) if dataloader_len > 0 else 0
+        if schedules.media_eval_trigger != "eval":
+            raise ValueError(f"不支持的 eval 图片触发源: {schedules.media_eval_trigger}")
+        if schedules.media_eval_policy != "last_batch_per_eval":
+            raise ValueError(f"不支持的 eval 图片策略: {schedules.media_eval_policy}")
+        should_eval_media = self.context.is_main_process and self.algorithm.visualize_eval_last and schedules.should_eval_media(eval_index)
+        should_eval_behavior = schedules.should_eval_behavior(eval_index)
         metric_store = self.recorder.metric_store()
         heavy_store = self.recorder.metric_store()
         last_prepared = None
@@ -227,7 +235,7 @@ class Trainer:
             )
             for batch_idx, batch in enumerate(iterator):
                 # 默认只给最后一个评估 batch 生成图片，控制磁盘和 W&B 开销
-                should_images = self.context.is_main_process and self.algorithm.visualize_eval_last and batch_idx == num_batches - 1
+                should_images = should_eval_media and batch_idx == num_batches - 1
                 # 与训练一致的 batch 准备流程
                 prepared = self.algorithm.prepare_batch(batch, transform, device, mode=eval_type, should_log_images=should_images)
                 with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
@@ -236,19 +244,8 @@ class Trainer:
                 metric_logs = dict(result.logs)
                 metric_logs.update(self.algorithm.light_metrics(eval_model, prepared, result, state, config, mode=eval_type))
                 metric_store.update(metric_logs)
-                should_heavy = should_log_event(
-                    heavy_freq,
-                    epoch,
-                    num_batches,
-                    batch_idx,
-                    log_by_global_step,
-                    heavy_start,
-                    log_first_step,
-                )
-                if eval_heavy_every_eval and batch_idx == num_batches - 1:
-                    # 评估阶段保证每个数据集至少有一次 behavior 曲线，避免频率未对齐导致面板缺失
-                    should_heavy = True
-                if should_heavy:
+                if should_eval_behavior and batch_idx == num_batches - 1:
+                    # eval behavior 按 eval 次数触发，只在最后一个 batch 采样，控制扩散采样开销
                     heavy_logs = self.algorithm.heavy_metrics(eval_model, prepared, state, config, mode=eval_type)
                     if heavy_logs:
                         heavy_store.update(heavy_logs)
@@ -268,7 +265,7 @@ class Trainer:
             if data_log:
                 self.recorder.log_metrics(data_log, step=self.global_step, commit=False)
 
-            if last_prepared is not None and last_result is not None:
+            if should_eval_media and last_prepared is not None and last_result is not None:
                 self.algorithm.visualize(
                     model=eval_model,
                     prepared=last_prepared,
@@ -293,6 +290,7 @@ class Trainer:
         # setup 会构建 Dataset/DataLoader，并把 dataset_metadata 写回 config["data"]
         self.datamodule.setup(build_lmdb_only=False)
         runtime = self.config["runtime"]
+        schedules = build_logging_schedules(self.config["logging"])
         # system/runtime 静态配置交给性能回调记录，Trainer 只负责触发生命周期 hook
         self.callbacks.call("log_runtime_config", recorder=self.recorder, config=self.config, global_step=self.global_step)
 
@@ -316,6 +314,8 @@ class Trainer:
 
         try:
             # 训练与评估主循环
+            # eval_index 是 1-based 的 eval 事件计数；断点恢复时从已完成 epoch 推导，保持 unit=eval 的节奏稳定
+            eval_index = sum(1 for completed_epoch in range(resume_state.current_epoch) if schedules.should_eval_epoch(completed_epoch))
             for epoch in range(resume_state.current_epoch, end_epoch):
                 # 分布式训练时需要为采样器设置 epoch 保证洗牌一致
                 if self.datamodule.train_sampler is not None:
@@ -341,9 +341,10 @@ class Trainer:
                 # 评估阶段（可配置评估频率与分布式评估）
                 eval_summaries = {}
                 distributed_eval = bool(runtime.get("distributed_eval", False))
-                should_eval = (epoch + 1) % int(runtime["eval_freq"]) == 0
+                should_eval = schedules.should_eval_epoch(epoch)
                 # 默认只在主进程评估；distributed_eval=True 时每个进程评估自己的子集再聚合
                 if should_eval and (self.context.is_main_process or (self.context.distributed and distributed_eval)):
+                    eval_index += 1
                     for dataset_type, loader in self.datamodule.test_dataloaders.items():
                         if self.context.is_main_process:
                             print(f"开始 {dataset_type} 测试轮次 {epoch}/{end_epoch - 1}")
@@ -356,6 +357,7 @@ class Trainer:
                             project_folder=runtime["project_folder"],
                             config=self.config,
                             epoch=epoch,
+                            eval_index=eval_index,
                             distributed=self.context.distributed and distributed_eval,
                             state=state,
                         )

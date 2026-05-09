@@ -67,10 +67,6 @@ runtime:
   test_persistent_workers: true
   # 是否启用分布式评估
   distributed_eval: false
-  # 评估时使用的数据比例（0~1）
-  eval_fraction: 0.25
-  # 每隔多少个 epoch 评估一次
-  eval_freq: 1
   # 仅构建 LMDB 缓存（不训练）
   build_lmdb_only: false
   # DDP 前是否强制检查 LMDB 缓存完整性
@@ -197,28 +193,66 @@ metrics:
   heavy: []
 
 logging:
-  # 指标日志频率（步）
-  metric_log_freq: 100
-  # 图像日志频率（步）
-  image_log_freq: 2000
-  # 重指标日志频率（步）
-  heavy_metric_log_freq: 1000
-  # 重指标开始步数
-  heavy_metric_start_step: 1000
-  # 评估阶段每个数据集每次 eval 至少记录一次重指标，避免 dataset-specific behavior 曲线缺失
-  eval_heavy_every_eval: true
-  # 图像日志开始步数
-  image_start_step: 1000
-  # 性能日志频率（步）
-  perf_log_freq: 50
-  # 优化器健康日志频率（步）：记录 lr、grad_norm、AMP grad_scale
-  optim_log_freq: 100
-  # 参数范数日志频率（步）：0 表示默认关闭，诊断权重爆炸/塌缩时再开启
-  param_norm_log_freq: 0
-  # 是否按 global_step 统计频率
-  by_global_step: true
-  # 是否在第 0 步也记录
-  first_step: false
+  # 日志横轴策略：默认按全局 optimizer step 计数
+  step:
+    by_global_step: true
+    first_step: false
+  # train 板块：普通训练曲线和昂贵 behavior 曲线
+  train:
+    metrics:
+      # train/loss、train/action、train/metrics 的记录频率（步）
+      freq: 100
+      unit: step
+    behavior:
+      # train/behavior 的记录频率（步）
+      freq: 1000
+      unit: step
+      # behavior 指标通常较贵，训练早期默认跳过
+      start_step: 1000
+    optim:
+      # train/optim/lr、grad_norm、AMP grad_scale 的记录频率（步）
+      freq: 100
+      unit: step
+    param_norm:
+      # 0 表示默认关闭，诊断权重爆炸/塌缩时再开启
+      freq: 0
+      unit: step
+  # eval 板块：评估执行和 eval 重指标都在这里表达
+  eval:
+    schedule:
+      # 每隔多少个 epoch 评估一次
+      freq: 1
+      unit: epoch
+      # 评估时使用的数据比例（0~1）
+      fraction: 0.25
+    behavior:
+      # 每多少次 eval 记录一次 behavior 重指标
+      freq: 1
+      unit: eval
+  # media 板块：训练图片和 eval 图片独立控制
+  media:
+    train:
+      freq: 2000
+      unit: step
+      start_step: 1000
+    eval:
+      trigger: eval
+      freq: 1
+      unit: eval
+      policy: last_batch_per_eval
+  # runtime 板块：训练热路径耗时和吞吐
+  runtime:
+    perf:
+      freq: 50
+      unit: step
+  # system 板块：硬件和分布式静态信息
+  system:
+    gpu:
+      enabled: true
+      freq: 50
+      unit: step
+    ddp:
+      log_once: true
   # 控制移动平均窗口大小
   window_size: 100
   # 日志 sink 列表（console/wandb 等）
