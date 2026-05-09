@@ -32,6 +32,8 @@ noise_schedulers/
 
 data/
   Navigation dataset protocol, LMDB cache handling, and DDP-safe DataLoaders.
+  Deterministic epoch/index-aware sampling lives in `data/sampling.py`; label
+  sampling uses `data/labeling.py`.
   Offline dataset-statistics tools do not live here.
 
 models/
@@ -148,9 +150,12 @@ New runs are saved in the `training_base` checkpoint schema with
 `latest.pth` and the auxiliary latest files are written through a temp file and
 atomic replace; an existing latest file is kept as `*.backup.pth`.
 
-Recovery is epoch-level. Checkpoints restore Python, NumPy, Torch CPU, and CUDA
-RNG state when the field is present. Older checkpoints without `rng_state` still
-load, but strict replay after resume is not guaranteed.
+Recovery is epoch-level only; mid-epoch replay is intentionally not promised.
+Checkpoints restore Python, NumPy, Torch CPU, and CUDA RNG state when the field
+is present. Older checkpoints without `rng_state` still load, but strict replay
+after resume is not guaranteed. Callback state is saved with the checkpoint, and
+epoch-aware data sampling derives stochastic labels from `seed + epoch + index`
+so resumed epochs do not depend on worker-local random streams.
 
 Old GNM, ViNT, and NoMaD checkpoints are read-only compatible where the legacy
 module names are known. Loading reports missing and unexpected model keys after

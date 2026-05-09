@@ -9,8 +9,11 @@ from training_base.data.action_stats import get_action_torch, get_delta_torch, l
 from training_base.data.batch import NavigationBatch, navigation_collate
 from training_base.data.data_module import NavigationDataModule
 from training_base.data.navigation_dataset import NavigationDataset
+from training_base.data.sampling import EpochAwareDataset, EpochAwareSampler, stable_subset_indices
 
 __all__ = [
+    "EpochAwareDataset",
+    "EpochAwareSampler",
     "NavigationBatch",
     "NavigationDataModule",
     "NavigationDataset",
@@ -19,5 +22,6 @@ __all__ = [
     "load_action_stats",
     "navigation_collate",
     "normalize_data_torch",
+    "stable_subset_indices",
     "unnormalize_data_torch",
 ]

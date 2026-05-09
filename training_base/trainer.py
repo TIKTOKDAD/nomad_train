@@ -51,10 +51,169 @@ class Trainer:
         if message:
             print(f"(轮次 {epoch}) (批次 {batch_idx}/{num_batches - 1}) {mode}: {message}")
 
+    def _run_train_step(
+        self,
+        *,
+        model,
+        optimizer,
+        batch,
+        transform,
+        device,
+        config,
+        epoch,
+        batch_idx,
+        num_batches,
+        grad_scaler,
+        state,
+        schedules,
+    ):
+        runtime = config["runtime"]
+        should_images = self.context.is_main_process and schedules.should_log(schedules.media_train, epoch, num_batches, batch_idx)
+        prepared = self.algorithm.prepare_batch(batch, transform, device, mode="train", should_log_images=should_images)
+
+        with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
+            result = self.algorithm.train_step(model, prepared, state, config)
+
+        should_optim_stats = self.context.is_main_process and schedules.should_log(
+            schedules.train_optim,
+            epoch,
+            num_batches,
+            batch_idx,
+        )
+        should_param_norm = self.context.is_main_process and schedules.should_log(
+            schedules.train_param_norm,
+            epoch,
+            num_batches,
+            batch_idx,
+        )
+        optimizer_stats = scale_backward_step(
+            result.loss,
+            optimizer,
+            grad_scaler,
+            model=model,
+            clip_config=config.get("optimizer", {}).get("gradient_clip", {}),
+            collect_stats=should_optim_stats,
+            collect_param_norm=should_param_norm,
+        )
+        self.algorithm.after_optimizer_step(model, state, config)
+        self.callbacks.call("after_optimizer_step", model=model, algorithm=self.algorithm, state=state, config=config)
+        self.global_step += 1
+        if should_optim_stats or should_param_norm:
+            self.callbacks.call(
+                "log_optimizer_step",
+                recorder=self.recorder,
+                optimizer=optimizer,
+                stats=optimizer_stats,
+                global_step=self.global_step,
+            )
+        return prepared, result, should_images
+
+    def _log_train_light_metrics(self, *, model, prepared, result, state, config, epoch, batch_idx, num_batches, schedules, metric_store, iterator, show_tqdm) -> None:
+        if not self.context.is_main_process or not schedules.should_log(schedules.train_metrics, epoch, num_batches, batch_idx):
+            return
+        metric_logs = dict(result.logs)
+        metric_logs.update(self.algorithm.light_metrics(model, prepared, result, state, config, mode="train"))
+        metric_store.update(metric_logs)
+        if show_tqdm and result.loss is not None:
+            iterator.set_postfix(loss=float(result.loss.detach().float().item()))
+        self._print_store(metric_store, "train", epoch, batch_idx, num_batches)
+        self.recorder.log_metrics(
+            format_metric_logs(metric_store.latest(), "train"),
+            step=self.global_step,
+            commit=True,
+        )
+
+    def _log_train_heavy_metrics(self, *, model, prepared, state, config, epoch, batch_idx, num_batches, schedules, heavy_store) -> None:
+        if not self.context.is_main_process or not schedules.should_log(schedules.train_behavior, epoch, num_batches, batch_idx):
+            return
+        with torch.inference_mode():
+            metric_model = self.algorithm.model_for_eval(model, state)
+            metric_logs = self.algorithm.heavy_metrics(metric_model, prepared, state, config, mode="train")
+        if not metric_logs:
+            return
+        heavy_store.update(metric_logs)
+        self._print_store(heavy_store, "train_heavy", epoch, batch_idx, num_batches)
+        self.recorder.log_metrics(
+            format_metric_logs(heavy_store.latest(), "train", kind="behavior"),
+            step=self.global_step,
+            commit=True,
+        )
+
+    def _log_train_visualization(self, *, model, prepared, result, state, config, project_folder, epoch, batch_idx, num_batches, should_images) -> None:
+        if not should_images:
+            return
+        with torch.inference_mode():
+            viz_model = self.algorithm.model_for_eval(model, state)
+            self.algorithm.visualize(
+                model=viz_model,
+                prepared=prepared,
+                result=result,
+                state=state,
+                config=config,
+                mode="train",
+                project_folder=project_folder,
+                epoch=epoch,
+                batch_idx=batch_idx,
+                num_batches=num_batches,
+                global_step=self.global_step,
+                recorder=self.recorder,
+            )
+
+    def _log_train_runtime_perf(self, *, result, device, epoch, batch_idx, num_batches, schedules, data_time, compute_time, step_time) -> None:
+        if schedules.should_log(schedules.runtime_perf, epoch, num_batches, batch_idx):
+            self.callbacks.call(
+                "log_perf",
+                recorder=self.recorder,
+                mode="train",
+                epoch=epoch,
+                batch_idx=batch_idx,
+                batch_size=result.batch_size or 0,
+                data_time=data_time,
+                compute_time=compute_time,
+                step_time=step_time,
+                device=device,
+                global_step=self.global_step,
+            )
+        if schedules.should_system_gpu(epoch, num_batches, batch_idx):
+            self.callbacks.call(
+                "log_system_gpu",
+                recorder=self.recorder,
+                device=device,
+                global_step=self.global_step,
+            )
+
+    def _run_eval_step(self, *, eval_model, batch, transform, device, config, state, eval_type, should_images):
+        runtime = config["runtime"]
+        prepared = self.algorithm.prepare_batch(batch, transform, device, mode=eval_type, should_log_images=should_images)
+        with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
+            result = self.algorithm.eval_step(eval_model, prepared, state, config)
+        return prepared, result
+
+    def _log_eval_metrics(self, *, metric_store, heavy_store, eval_type) -> None:
+        data_log = format_metric_logs(metric_store.average(), eval_type)
+        data_log.update(format_metric_logs(heavy_store.average(), eval_type, kind="behavior"))
+        if data_log:
+            self.recorder.log_metrics(data_log, step=self.global_step, commit=False)
+
+    def _log_eval_visualization(self, *, eval_model, prepared, result, state, config, eval_type, project_folder, epoch, num_batches) -> None:
+        self.algorithm.visualize(
+            model=eval_model,
+            prepared=prepared,
+            result=result,
+            state=state,
+            config=config,
+            mode=eval_type,
+            project_folder=project_folder,
+            epoch=epoch,
+            batch_idx=max(num_batches - 1, 0),
+            num_batches=num_batches,
+            global_step=self.global_step,
+            recorder=self.recorder,
+        )
+
     # 单个训练 epoch：包含前向、反向、优化、日志、可视化与性能统计
     def _train_epoch(self, *, model, optimizer, dataloader, transform, device, project_folder, config, epoch, grad_scaler, state):
         model.train()
-        runtime = config["runtime"]
         logging = config["logging"]
         schedules = build_logging_schedules(logging)
         num_batches = len(dataloader)
@@ -77,128 +236,82 @@ class Trainer:
                 # 统计数据加载时间与计算时间
                 data_time = time.perf_counter() - end_time
                 compute_start = time.perf_counter()
-                # should_images 同时控制 batch 准备是否保留 CPU 可视化图，避免每步都 resize
-                should_images = self.context.is_main_process and schedules.should_log(schedules.media_train, epoch, num_batches, batch_idx)
-                # 数据准备由算法自行处理（如张量化、归一化、标签构造）
-                prepared = self.algorithm.prepare_batch(batch, transform, device, mode="train", should_log_images=should_images)
-
-                # AMP 环境下执行前向与损失计算
-                with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
-                    result = self.algorithm.train_step(model, prepared, state, config)
-
-                # 反向传播 + 可选梯度裁剪 + 参数更新
-                # scale_backward_step 内部负责 zero_grad、GradScaler、clip_grad 和 optimizer.step
-                should_optim_stats = self.context.is_main_process and schedules.should_log(
-                    schedules.train_optim,
-                    epoch,
-                    num_batches,
-                    batch_idx,
-                )
-                should_param_norm = self.context.is_main_process and schedules.should_log(
-                    schedules.train_param_norm,
-                    epoch,
-                    num_batches,
-                    batch_idx,
-                )
-                optimizer_stats = scale_backward_step(
-                    result.loss,
-                    optimizer,
-                    grad_scaler,
+                prepared, result, should_images = self._run_train_step(
                     model=model,
-                    clip_config=config.get("optimizer", {}).get("gradient_clip", {}),
-                    collect_stats=should_optim_stats,
-                    collect_param_norm=should_param_norm,
+                    optimizer=optimizer,
+                    batch=batch,
+                    transform=transform,
+                    device=device,
+                    config=config,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    num_batches=num_batches,
+                    grad_scaler=grad_scaler,
+                    state=state,
+                    schedules=schedules,
                 )
-                self.algorithm.after_optimizer_step(model, state, config)
-                # 回调：允许外部逻辑在更新后介入
-                self.callbacks.call("after_optimizer_step", model=model, algorithm=self.algorithm, state=state, config=config)
-                self.global_step += 1
-                if should_optim_stats or should_param_norm:
-                    self.callbacks.call(
-                        "log_optimizer_step",
-                        recorder=self.recorder,
-                        optimizer=optimizer,
-                        stats=optimizer_stats,
-                        global_step=self.global_step,
-                    )
 
                 # 轻量指标日志
                 # 轻量指标只复用当前 step 已经算出的预测，不额外跑完整采样或可视化
-                if self.context.is_main_process and schedules.should_log(schedules.train_metrics, epoch, num_batches, batch_idx):
-                    metric_logs = dict(result.logs)
-                    metric_logs.update(self.algorithm.light_metrics(model, prepared, result, state, config, mode="train"))
-                    metric_store.update(metric_logs)
-                    if show_tqdm and result.loss is not None:
-                        iterator.set_postfix(loss=float(result.loss.detach().float().item()))
-                    self._print_store(metric_store, "train", epoch, batch_idx, num_batches)
-                    # 轻量指标只做命名格式化，不触发额外前向/采样/画图
-                    self.recorder.log_metrics(
-                        format_metric_logs(metric_store.latest(), "train"),
-                        step=self.global_step,
-                        commit=True,
-                    )
+                self._log_train_light_metrics(
+                    model=model,
+                    prepared=prepared,
+                    result=result,
+                    state=state,
+                    config=config,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    num_batches=num_batches,
+                    schedules=schedules,
+                    metric_store=metric_store,
+                    iterator=iterator,
+                    show_tqdm=show_tqdm,
+                )
 
                 # 重计算指标日志（推理模式）
                 # NoMaD 行为指标等会执行反向扩散采样，因此用独立频率 heavy_freq 控制
-                if self.context.is_main_process and schedules.should_log(schedules.train_behavior, epoch, num_batches, batch_idx):
-                    with torch.inference_mode():
-                        metric_model = self.algorithm.model_for_eval(model, state)
-                        metric_logs = self.algorithm.heavy_metrics(metric_model, prepared, state, config, mode="train")
-                    if metric_logs:
-                        heavy_store.update(metric_logs)
-                        self._print_store(heavy_store, "train_heavy", epoch, batch_idx, num_batches)
-                        # 重指标单独走 behavior 命名空间，和普通 loss/action 曲线分离
-                        self.recorder.log_metrics(
-                            format_metric_logs(heavy_store.latest(), "train", kind="behavior"),
-                            step=self.global_step,
-                            commit=True,
-                        )
+                self._log_train_heavy_metrics(
+                    model=model,
+                    prepared=prepared,
+                    state=state,
+                    config=config,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    num_batches=num_batches,
+                    schedules=schedules,
+                    heavy_store=heavy_store,
+                )
 
                 # 可视化输出（如轨迹、动作分布等）
                 # 可视化统一使用 eval/EMA 模型，避免 dropout/BN 训练状态影响图像解释
-                if should_images:
-                    with torch.inference_mode():
-                        viz_model = self.algorithm.model_for_eval(model, state)
-                        self.algorithm.visualize(
-                            model=viz_model,
-                            prepared=prepared,
-                            result=result,
-                            state=state,
-                            config=config,
-                            mode="train",
-                            project_folder=project_folder,
-                            epoch=epoch,
-                            batch_idx=batch_idx,
-                            num_batches=num_batches,
-                            global_step=self.global_step,
-                            recorder=self.recorder,
-                        )
+                self._log_train_visualization(
+                    model=model,
+                    prepared=prepared,
+                    result=result,
+                    state=state,
+                    config=config,
+                    project_folder=project_folder,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    num_batches=num_batches,
+                    should_images=should_images,
+                )
 
                 compute_time = time.perf_counter() - compute_start
                 step_time = data_time + compute_time
                 # 性能监控回调：数据/计算/步长耗时
                 # data_time 近似 DataLoader 等待时间，compute_time 包含 prepare_batch 之后的训练计算
-                if schedules.should_log(schedules.runtime_perf, epoch, num_batches, batch_idx):
-                    self.callbacks.call(
-                        "log_perf",
-                        recorder=self.recorder,
-                        mode="train",
-                        epoch=epoch,
-                        batch_idx=batch_idx,
-                        batch_size=result.batch_size or 0,
-                        data_time=data_time,
-                        compute_time=compute_time,
-                        step_time=step_time,
-                        device=device,
-                        global_step=self.global_step,
-                    )
-                if schedules.should_system_gpu(epoch, num_batches, batch_idx):
-                    self.callbacks.call(
-                        "log_system_gpu",
-                        recorder=self.recorder,
-                        device=device,
-                        global_step=self.global_step,
-                    )
+                self._log_train_runtime_perf(
+                    result=result,
+                    device=device,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    num_batches=num_batches,
+                    schedules=schedules,
+                    data_time=data_time,
+                    compute_time=compute_time,
+                    step_time=step_time,
+                )
                 end_time = time.perf_counter()
 
     # 评估流程：支持部分采样评估与重指标汇总
@@ -206,7 +319,6 @@ class Trainer:
         # 评估模型可能是 EMA averaged_model，也可能是 unwrap 后的即时模型
         eval_model = self.algorithm.model_for_eval(model, state)
         eval_model.eval()
-        runtime = config["runtime"]
         logging = config["logging"]
         schedules = build_logging_schedules(logging)
         dataloader_len = len(dataloader)
@@ -238,9 +350,16 @@ class Trainer:
                 # 默认只给最后一个评估 batch 生成图片，控制磁盘和 W&B 开销
                 should_images = should_eval_media and batch_idx == num_batches - 1
                 # 与训练一致的 batch 准备流程
-                prepared = self.algorithm.prepare_batch(batch, transform, device, mode=eval_type, should_log_images=should_images)
-                with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
-                    result = self.algorithm.eval_step(eval_model, prepared, state, config)
+                prepared, result = self._run_eval_step(
+                    eval_model=eval_model,
+                    batch=batch,
+                    transform=transform,
+                    device=device,
+                    config=config,
+                    state=state,
+                    eval_type=eval_type,
+                    should_images=should_images,
+                )
                 # eval_step 的 logs 是基础损失，light_metrics 是按配置追加的轻量评估项
                 metric_logs = dict(result.logs)
                 metric_logs.update(self.algorithm.light_metrics(eval_model, prepared, result, state, config, mode=eval_type))
@@ -261,25 +380,19 @@ class Trainer:
         # 仅主进程记录评估日志与可视化
         if self.context.is_main_process and num_batches > 0:
             # eval_type 是数据集名，如 huron_test；格式化后进入 eval/{dataset}/...
-            data_log = format_metric_logs(metric_store.average(), eval_type)
-            data_log.update(format_metric_logs(heavy_store.average(), eval_type, kind="behavior"))
-            if data_log:
-                self.recorder.log_metrics(data_log, step=self.global_step, commit=False)
+            self._log_eval_metrics(metric_store=metric_store, heavy_store=heavy_store, eval_type=eval_type)
 
             if should_eval_media and last_prepared is not None and last_result is not None:
-                self.algorithm.visualize(
-                    model=eval_model,
+                self._log_eval_visualization(
+                    eval_model=eval_model,
                     prepared=last_prepared,
                     result=last_result,
                     state=state,
                     config=config,
-                    mode=eval_type,
+                    eval_type=eval_type,
                     project_folder=project_folder,
                     epoch=epoch,
-                    batch_idx=max(num_batches - 1, 0),
                     num_batches=num_batches,
-                    global_step=self.global_step,
-                    recorder=self.recorder,
                 )
 
         summary = metric_store.average()

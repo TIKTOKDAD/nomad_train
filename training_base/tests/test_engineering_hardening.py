@@ -8,14 +8,17 @@ from unittest import mock
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
 from training_base.algorithms.base import Algorithm, StepResult
 from training_base.core.checkpoint import ResumeState
 from training_base.core.checkpoint import atomic_torch_save, load_checkpoint, load_model_state, restore_rng_state, save_checkpoint
 from training_base.core.runtime import RuntimeContext
 from training_base.core.config import load_yaml, normalize_config
-from training_base.data.data_module import EpochAwareDataset, EpochAwareSampler, stable_subset_indices
+from training_base.data import data_module as data_module_exports
+from training_base.data.data_module import resolve_data_runtime
 from training_base.data.labeling import sample_goal
+from training_base.data.sampling import EpochAwareDataset, EpochAwareSampler, stable_subset_indices
 from training_base.loggers.wandb import WandBSink
 from training_base.registry import callback_registry
 from training_base.trainer import Trainer
@@ -34,6 +37,21 @@ class _UnitStatefulCallback:
 
     def load_state_dict(self, state):
         self.count = int(state.get("count", 0))
+
+
+class _ContextDataset(torch.utils.data.Dataset):
+    def __len__(self):
+        return 6
+
+    def __getitem__(self, index):
+        from training_base.data.labeling import sample_goal
+
+        goals_index = [(f"goal_{item}", item) for item in range(20)]
+        return sample_goal("traj", 10, 0, 2, goals_index)
+
+
+def _identity_collate(batch):
+    return batch
 
 
 class CheckpointHardeningTest(unittest.TestCase):
@@ -195,6 +213,11 @@ class ConfigHardeningTest(unittest.TestCase):
 
 
 class DataSubsetTest(unittest.TestCase):
+    def test_sampling_module_and_legacy_data_module_exports_match(self):
+        self.assertIs(data_module_exports.EpochAwareDataset, EpochAwareDataset)
+        self.assertIs(data_module_exports.EpochAwareSampler, EpochAwareSampler)
+        self.assertIs(data_module_exports.stable_subset_indices, stable_subset_indices)
+
     def test_stable_subset_indices_are_seeded(self):
         first = stable_subset_indices(10, 0.3, seed=7)
         second = stable_subset_indices(10, 0.3, seed=7)
@@ -225,6 +248,55 @@ class DataSubsetTest(unittest.TestCase):
         self.assertEqual(sample_for(3, 7), sample_for(3, 7))
         self.assertNotEqual(sample_for(3, 7), sample_for(4, 7))
         self.assertEqual(len(list(iter(sampler))), 3)
+
+    def test_epoch_aware_dataloader_is_deterministic_with_persistent_workers(self):
+        def collect(seed, epoch):
+            dataset = EpochAwareDataset(_ContextDataset(), seed=seed)
+            sampler = EpochAwareSampler(dataset, shuffle=False, seed=seed)
+            loader = DataLoader(
+                dataset,
+                batch_size=2,
+                sampler=sampler,
+                num_workers=2,
+                persistent_workers=True,
+                collate_fn=_identity_collate,
+            )
+            dataset.set_epoch(epoch)
+            sampler.set_epoch(epoch)
+            try:
+                return list(loader)
+            finally:
+                iterator = getattr(loader, "_iterator", None)
+                if iterator is not None:
+                    iterator._shutdown_workers()
+
+        self.assertEqual(collect(seed=11, epoch=3), collect(seed=11, epoch=3))
+        self.assertNotEqual(collect(seed=11, epoch=3), collect(seed=11, epoch=4))
+        self.assertNotEqual(collect(seed=11, epoch=3), collect(seed=12, epoch=3))
+
+    def test_resolve_data_runtime_centralizes_effective_fields(self):
+        runtime = {"batch_size": 8, "eval_batch_size": 3}
+        effective = resolve_data_runtime(
+            runtime,
+            distributed=True,
+            world_size=2,
+            train_subset_size=5,
+            train_subset_total_size=10,
+            train_num_workers=4,
+        )
+        self.assertEqual(
+            effective,
+            {
+                "global_batch_size": 8,
+                "batch_size": 8,
+                "per_device_batch_size": 4,
+                "train_subset_size": 5,
+                "train_subset_total_size": 10,
+                "num_workers_per_rank": 4,
+                "eval_batch_size": 3,
+            },
+        )
+        self.assertEqual(runtime, {"batch_size": 8, "eval_batch_size": 3})
 
 
 class _DummyDataModule:

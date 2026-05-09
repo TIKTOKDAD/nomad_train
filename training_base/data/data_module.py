@@ -10,98 +10,29 @@ from copy import deepcopy
 from typing import Dict, Iterable
 
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler, Subset
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 from torchvision import transforms
 
 from training_base.core.dataloader import loader_kwargs, workers_per_rank
 from training_base.core.runtime import RuntimeContext, barrier, is_torchrun, seed_worker
 from training_base.data.batch import navigation_collate
-from training_base.data.labeling import sample_context
 from training_base.data.lmdb_cache import check_lmdb_cache_ready
 from training_base.data.navigation_dataset import NavigationDataset
+from training_base.data.sampling import (
+    EpochAwareDataset,
+    EpochAwareSampler,
+    _seeded_generator,
+    build_epoch_sampler,
+    stable_subset_indices,
+)
 
 
-def _seeded_generator(seed: int, offset: int = 0) -> torch.Generator:
-    generator = torch.Generator()
-    generator.manual_seed(int(seed) + int(offset))
-    return generator
-
-
-def stable_subset_indices(dataset_size: int, subset_fraction: float, seed: int) -> list:
-    if dataset_size <= 0:
-        return []
-    subset_size = max(1, int(dataset_size * float(subset_fraction)))
-    subset_size = min(subset_size, dataset_size)
-    return torch.randperm(dataset_size, generator=_seeded_generator(seed))[:subset_size].tolist()
-
-
-class EpochAwareDataset(Dataset):
-    """Wrap a dataset so each item receives seed/epoch/index sampling context."""
-
-    def __init__(self, dataset: Dataset, *, seed: int) -> None:
-        self.dataset = dataset
-        self.seed = int(seed)
-        self.epoch = 0
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    def __getitem__(self, index):
-        epoch = self.epoch
-        sample_index = index
-        if isinstance(index, tuple) and len(index) == 2:
-            epoch, sample_index = index
-        with sample_context(seed=self.seed, epoch=int(epoch), index=int(sample_index)):
-            return self.dataset[int(sample_index)]
-
-
-class EpochAwareSampler(Sampler):
-    """Sequential or shuffled sampler that carries epoch into dataset indexing."""
-
-    def __init__(self, data_source: Dataset, *, shuffle: bool, seed: int, offset: int = 0) -> None:
-        self.data_source = data_source
-        self.shuffle = bool(shuffle)
-        self.seed = int(seed)
-        self.offset = int(offset)
-        self.epoch = 0
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
-
-    def __iter__(self):
-        dataset_size = len(self.data_source)
-        if self.shuffle:
-            indices = torch.randperm(dataset_size, generator=_seeded_generator(self.seed, self.offset + self.epoch)).tolist()
-        else:
-            indices = list(range(dataset_size))
-        return iter((self.epoch, int(index)) for index in indices)
-
-    def __len__(self) -> int:
-        return len(self.data_source)
-
-
-class EpochAwareDistributedSampler(DistributedSampler):
-    """DistributedSampler variant that also passes epoch to the dataset."""
-
-    def __iter__(self):
-        return iter((self.epoch, int(index)) for index in super().__iter__())
-
-
-def apply_train_subset(dataset: Dataset, runtime: dict) -> Dataset:
+def apply_train_subset(dataset: Dataset, *, subset_fraction: float, seed: int) -> tuple[Dataset, int, int]:
     original_size = len(dataset)
-    subset_fraction = float(runtime.get("train_subset", 1.0))
-    if subset_fraction < 1.0:
-        indices = stable_subset_indices(original_size, subset_fraction, int(runtime.get("seed", 0)))
+    if float(subset_fraction) < 1.0:
+        indices = stable_subset_indices(original_size, subset_fraction, int(seed))
         dataset = Subset(dataset, indices)
-        runtime["train_subset_size"] = len(indices)
-    else:
-        runtime["train_subset_size"] = len(dataset)
-    runtime["train_subset_total_size"] = original_size
-    return dataset
+    return dataset, len(dataset), original_size
 
 
 def resolve_train_batch_size(runtime: dict, *, distributed: bool, world_size: int) -> tuple[int, int]:
@@ -114,23 +45,32 @@ def resolve_train_batch_size(runtime: dict, *, distributed: bool, world_size: in
                 f"全局 batch_size={per_device_batch_size} 必须能被 world_size={world_size} 整除，以保持 DDP batch 语义。"
             )
         per_device_batch_size = per_device_batch_size // world_size
-    runtime["global_batch_size"] = global_batch_size
-    runtime["batch_size"] = global_batch_size
-    runtime["per_device_batch_size"] = per_device_batch_size
     return global_batch_size, per_device_batch_size
 
 
-def build_epoch_sampler(dataset: Dataset, *, distributed: bool, world_size: int, rank: int, seed: int):
-    if distributed:
-        return EpochAwareDistributedSampler(
-            dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,
-            seed=int(seed),
-            drop_last=False,
-        )
-    return EpochAwareSampler(dataset, shuffle=True, seed=int(seed))
+def resolve_data_runtime(
+    runtime: dict,
+    *,
+    distributed: bool,
+    world_size: int,
+    train_subset_size: int,
+    train_subset_total_size: int,
+    train_num_workers: int,
+) -> dict:
+    global_batch_size, per_device_batch_size = resolve_train_batch_size(
+        runtime,
+        distributed=distributed,
+        world_size=world_size,
+    )
+    return {
+        "global_batch_size": global_batch_size,
+        "batch_size": global_batch_size,
+        "per_device_batch_size": per_device_batch_size,
+        "train_subset_size": int(train_subset_size),
+        "train_subset_total_size": int(train_subset_total_size),
+        "num_workers_per_rank": int(train_num_workers),
+        "eval_batch_size": int(runtime.get("eval_batch_size", global_batch_size)),
+    }
 
 
 # 根据配置生成所有数据集分割信息
@@ -293,6 +233,12 @@ class NavigationDataModule:
             return "read"
         return mode
 
+    def _prepare_data_defaults(self) -> None:
+        data = self.config["data"]
+        # 旧配置可能缺少这两个字段，在进入 Dataset 前补齐
+        data.setdefault("context_type", "temporal")
+        data.setdefault("clip_goals", False)
+
     # 构建训练与测试数据集，并记录元数据
     def _build_datasets(self, build_lmdb_only: bool):
         config = self.config
@@ -369,31 +315,21 @@ class NavigationDataModule:
             barrier()
         return train_dataset, test_datasets
 
-    # 初始化 DataLoader，支持仅构建缓存模式
-    def setup(self, build_lmdb_only: bool = False) -> None:
-        config = self.config
-        runtime = config["runtime"]
-        data = config["data"]
-        # 旧配置可能缺少这两个字段，在进入 Dataset 前补齐
-        data.setdefault("context_type", "temporal")
-        data.setdefault("clip_goals", False)
-
-        train_datasets, test_datasets = self._build_datasets(build_lmdb_only)
-        if build_lmdb_only:
-            return
-
-        # 合并多个训练数据集为一个 ConcatDataset
+    def _build_train_dataset(self, train_datasets) -> tuple[Dataset, int, int]:
+        runtime = self.config["runtime"]
         if not train_datasets:
             raise RuntimeError("未配置任何训练数据集，请检查 data.datasets 中的 train split。")
-        train_dataset = apply_train_subset(ConcatDataset(train_datasets), runtime)
-        train_dataset = EpochAwareDataset(train_dataset, seed=int(runtime.get("seed", 0)))
-        self.train_dataset = train_dataset
-        # global_batch_size 若设置，代表跨所有 DDP rank 的总 batch；否则沿用 runtime.batch_size
-        global_batch_size, train_batch_size = resolve_train_batch_size(
-            runtime,
-            distributed=self.context.distributed,
-            world_size=self.context.world_size,
+        dataset, subset_size, total_size = apply_train_subset(
+            ConcatDataset(train_datasets),
+            subset_fraction=float(runtime.get("train_subset", 1.0)),
+            seed=int(runtime.get("seed", 0)),
         )
+        dataset = EpochAwareDataset(dataset, seed=int(runtime.get("seed", 0)))
+        self.train_dataset = dataset
+        return dataset, subset_size, total_size
+
+    def _build_train_loader(self, *, train_dataset: Dataset, train_batch_size: int, train_num_workers: int, pin_memory: bool, prefetch_factor: int):
+        runtime = self.config["runtime"]
         self.train_sampler = build_epoch_sampler(
             train_dataset,
             distributed=self.context.distributed,
@@ -401,16 +337,8 @@ class NavigationDataModule:
             rank=self.context.rank,
             seed=int(runtime.get("seed", 0)),
         )
-
-        # DataLoader 性能参数集中从 runtime 读取，方便在 YAML 中统一调参
-        pin_memory = bool(runtime.get("pin_memory", torch.cuda.is_available()))
-        prefetch_factor = int(runtime.get("prefetch_factor", 2))
-        train_num_workers = workers_per_rank(runtime, self.context.distributed, self.context.world_size, train=True)
-        runtime["num_workers_per_rank"] = train_num_workers
         persistent_workers = bool(runtime.get("persistent_workers", train_num_workers > 0))
-
-        # 训练 DataLoader
-        self.train_loader = DataLoader(
+        return DataLoader(
             train_dataset,
             batch_size=train_batch_size,
             shuffle=False,
@@ -422,25 +350,9 @@ class NavigationDataModule:
             **loader_kwargs(train_num_workers, pin_memory, prefetch_factor, persistent_workers),
         )
 
-        runtime.setdefault("eval_batch_size", runtime["batch_size"])
+    def _build_eval_loaders(self, *, test_datasets, test_num_workers: int, pin_memory: bool, prefetch_factor: int) -> None:
+        runtime = self.config["runtime"]
         distributed_eval = bool(runtime.get("distributed_eval", False))
-        # 评估 worker 可以独立配置，避免测试阶段和训练阶段吞吐需求绑定
-        test_num_workers = workers_per_rank(runtime, self.context.distributed and distributed_eval, self.context.world_size, train=False)
-
-        if self.context.is_main_process:
-            print(
-                "导航 DataLoader 配置: "
-                f"global_batch_size={global_batch_size}, "
-                f"per_device_batch_size={train_batch_size}, "
-                f"eval_batch_size={runtime['eval_batch_size']}, "
-                f"train_subset_size={runtime.get('train_subset_size')}/{runtime.get('train_subset_total_size')}, "
-                f"train_num_workers_per_rank={train_num_workers}, "
-                f"test_num_workers={test_num_workers}, "
-                f"distributed_eval={distributed_eval}, "
-                f"pin_memory={pin_memory}"
-            )
-
-        # 构建测试集 DataLoader
         for dataset_type, dataset in test_datasets.items():
             if self.context.distributed and distributed_eval:
                 # 分布式评估时手动按 rank 切片；之后 MetricStore.reduce_distributed 聚合指标
@@ -464,3 +376,61 @@ class NavigationDataModule:
                     bool(runtime.get("test_persistent_workers", test_num_workers > 0)),
                 ),
             )
+
+    def _log_loader_summary(self, *, train_num_workers: int, test_num_workers: int, pin_memory: bool) -> None:
+        if not self.context.is_main_process:
+            return
+        runtime = self.config["runtime"]
+        print(
+            "导航 DataLoader 配置: "
+            f"global_batch_size={runtime['global_batch_size']}, "
+            f"per_device_batch_size={runtime['per_device_batch_size']}, "
+            f"eval_batch_size={runtime['eval_batch_size']}, "
+            f"train_subset_size={runtime.get('train_subset_size')}/{runtime.get('train_subset_total_size')}, "
+            f"train_num_workers_per_rank={train_num_workers}, "
+            f"test_num_workers={test_num_workers}, "
+            f"distributed_eval={bool(runtime.get('distributed_eval', False))}, "
+            f"pin_memory={pin_memory}"
+        )
+
+    # 初始化 DataLoader，支持仅构建缓存模式
+    def setup(self, build_lmdb_only: bool = False) -> None:
+        runtime = self.config["runtime"]
+        self._prepare_data_defaults()
+        train_datasets, test_datasets = self._build_datasets(build_lmdb_only)
+        if build_lmdb_only:
+            return
+
+        train_dataset, train_subset_size, train_subset_total_size = self._build_train_dataset(train_datasets)
+        train_num_workers = workers_per_rank(runtime, self.context.distributed, self.context.world_size, train=True)
+        effective_runtime = resolve_data_runtime(
+            runtime,
+            distributed=self.context.distributed,
+            world_size=self.context.world_size,
+            train_subset_size=train_subset_size,
+            train_subset_total_size=train_subset_total_size,
+            train_num_workers=train_num_workers,
+        )
+        runtime.update(effective_runtime)
+
+        # DataLoader 性能参数集中从 runtime 读取，方便在 YAML 中统一调参
+        pin_memory = bool(runtime.get("pin_memory", torch.cuda.is_available()))
+        prefetch_factor = int(runtime.get("prefetch_factor", 2))
+        self.train_loader = self._build_train_loader(
+            train_dataset=train_dataset,
+            train_batch_size=runtime["per_device_batch_size"],
+            train_num_workers=train_num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+        )
+
+        distributed_eval = bool(runtime.get("distributed_eval", False))
+        # 评估 worker 可以独立配置，避免测试阶段和训练阶段吞吐需求绑定
+        test_num_workers = workers_per_rank(runtime, self.context.distributed and distributed_eval, self.context.world_size, train=False)
+        self._log_loader_summary(train_num_workers=train_num_workers, test_num_workers=test_num_workers, pin_memory=pin_memory)
+        self._build_eval_loaders(
+            test_datasets=test_datasets,
+            test_num_workers=test_num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+        )

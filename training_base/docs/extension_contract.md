@@ -53,3 +53,5 @@ The current navigation data contract is image-based and temporal:
 - labels: action trajectory, distance, goal position, action mask, dataset index, metric scale
 
 New modalities or non-temporal sampling should be implemented through a dataset/adapter layer rather than by growing `NavigationDataset` with more mode-specific branches.
+
+Deterministic sample context is framework-owned: `data/sampling.py` passes `(seed, epoch, index)` to `data/labeling.sample_context`, and labeling code derives stochastic goals from that context. New datasets should either reuse that path or provide an adapter with the same deterministic contract.
