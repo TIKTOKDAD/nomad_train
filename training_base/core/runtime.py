@@ -7,6 +7,7 @@
 # 3. 封装 DDP 参数，禁止回退到单进程多 GPU DataParallel
 import inspect
 import os
+import random
 from dataclasses import dataclass
 from typing import List
 
@@ -114,6 +115,7 @@ def broadcast_string(value: str, src: int = 0) -> str:
 def seed_worker(worker_id: int) -> None:
     # torch DataLoader 会为每个 worker 派生 initial_seed，这里同步到 numpy
     worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
     np.random.seed(worker_seed)
 
 
@@ -122,6 +124,7 @@ def setup_seed(config) -> None:
     if "seed" not in config:
         return
     # 同时设置 numpy、CPU torch 和 CUDA torch，尽量提升实验可复现性
+    random.seed(config["seed"])
     np.random.seed(config["seed"])
     torch.manual_seed(config["seed"])
     if torch.cuda.is_available():
@@ -132,7 +135,12 @@ def setup_seed(config) -> None:
 def setup_cudnn(config) -> None:
     deterministic = bool(config.get("deterministic", False))
     cudnn.deterministic = deterministic
-    cudnn.benchmark = bool(config.get("cudnn_benchmark", not deterministic))
+    cudnn.benchmark = False if deterministic else bool(config.get("cudnn_benchmark", True))
+    try:
+        torch.use_deterministic_algorithms(deterministic)
+    except Exception as exc:
+        if deterministic:
+            raise RuntimeError("启用 deterministic=True 时无法设置 torch deterministic algorithms。") from exc
 
 
 # 构建 DDP 参数，兼容旧版本 PyTorch

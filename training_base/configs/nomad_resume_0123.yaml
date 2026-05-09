@@ -3,6 +3,7 @@
 # ============================================================
 # 本文件用于从已有 NoMaD run 恢复训练。
 # 关键差异在 runtime.load_run，模型/目标/优化器结构需与待恢复 checkpoint 兼容。
+# runtime.epochs 表示恢复后希望达到的总 epoch 数，不是额外追加训练轮数。
 
 algorithm:
   # 算法注册名：使用 NoMaDAlgorithm

@@ -8,19 +8,13 @@
 # 3. 计算局部坐标系下的动作标签
 # 4. 使用LMDB缓存加速图像加载
 
-import numpy as np
 import os
 import yaml
-from typing import Any, Dict, List, Optional, Tuple
-import tqdm
+from typing import Tuple
 import io
-import json
-import lmdb  # Lightning Memory-Mapped Database - 高效的键值存储
-import shutil
 
 import torch
 from torch.utils.data import Dataset
-import torchvision.transforms.functional as TF
 
 import pickle
 import sys
@@ -36,155 +30,14 @@ from training_base.data.data_utils import (
     img_path_to_data,  # 加载并预处理图像
     calculate_sin_cos,  # 将角度转换为sin/cos表示
     get_data_path,  # 获取数据文件路径
-    to_local_coords,  # 转换到局部坐标系
 )
-
-
-# LMDB 缓存版本号：用于校验缓存是否与当前逻辑匹配
-LMDB_CACHE_VERSION = 1
-
-
-# 解析距离类别范围，确保合法且有序
-def _resolved_distance_bounds(min_dist_cat: int, max_dist_cat: int, waypoint_spacing: int) -> Tuple[int, int]:
-    # 生成离散距离桶（按 waypoint_spacing 步长）
-    distance_categories = list(range(min_dist_cat, max_dist_cat + 1, waypoint_spacing))
-    if len(distance_categories) == 0:
-        raise ValueError(
-            f"无效的距离范围: min={min_dist_cat}, max={max_dist_cat}, spacing={waypoint_spacing}"
-        )
-    # 返回最小/最大可用距离
-    return distance_categories[0], distance_categories[-1]
-
-
-# 返回 LMDB 缓存路径与完成标记路径
-def get_lmdb_cache_paths(data_split_folder: str, dataset_name: str) -> Tuple[str, str]:
-    # cache_path 存储 LMDB 数据；complete_path 记录构建完成与校验信息
-    cache_path = os.path.join(data_split_folder, f"dataset_{dataset_name}.lmdb")
-    complete_path = f"{cache_path}.complete.json"
-    return cache_path, complete_path
-
-
-# 根据数据参数生成索引文件路径
-def get_dataset_index_path(
-    data_split_folder: str,
-    min_dist_cat: int,
-    max_dist_cat: int,
-    waypoint_spacing: int,
-    context_type: str,
-    context_size: int,
-    end_slack: int,
-) -> str:
-    # 将关键参数编码进文件名，避免不同配置复用同一索引
-    min_dist_cat, max_dist_cat = _resolved_distance_bounds(
-        min_dist_cat,
-        max_dist_cat,
-        waypoint_spacing,
-    )
-    return os.path.join(
-        data_split_folder,
-        f"dataset_dist_{min_dist_cat}_to_{max_dist_cat}_context_{context_type}_n{context_size}_slack_{end_slack}.pkl",
-    )
-
-
-# 判断路径是否存在（文件或目录）
-def _path_exists(path: str) -> bool:
-    return os.path.isdir(path) or os.path.isfile(path)
-
-
-# 删除文件或目录
-def _remove_path(path: str) -> None:
-    if os.path.isdir(path):
-        shutil.rmtree(path)
-    elif os.path.exists(path):
-        os.remove(path)
-
-
-# 从索引文件读取期望的缓存图像数量
-def _load_expected_lmdb_count(index_path: str) -> int:
-    # 索引文件内包含 goals_index，长度即期望缓存图像数量
-    with open(index_path, "rb") as f:
-        _, goals_index = pickle.load(f)
-    return len(goals_index)
-
-
-# 校验 LMDB 缓存完整性与版本一致性
-def _validate_lmdb_cache(
-    cache_path: str,
-    complete_path: str,
-    dataset_name: str,
-    expected_num_images: int,
-) -> Tuple[bool, List[str]]:
-    errors = []
-    # 1) 缓存目录是否存在
-    if not _path_exists(cache_path):
-        errors.append(f"缺少 LMDB 缓存: {cache_path}")
-    # 2) 完成标记是否存在
-    if not os.path.exists(complete_path):
-        errors.append(f"缺少完成标记: {complete_path}")
-        return False, errors
-
-    # 3) 标记内容可读且字段齐全
-    try:
-        with open(complete_path, "r", encoding="utf-8") as f:
-            marker = json.load(f)
-    except Exception as exc:
-        errors.append(f"完成标记无效 {complete_path}: {exc}")
-        return False, errors
-
-    # 4) 版本号是否匹配
-    if int(marker.get("version", -1)) != LMDB_CACHE_VERSION:
-        errors.append(
-            f"完成标记版本不匹配 {complete_path}: "
-            f"{marker.get('version')} != {LMDB_CACHE_VERSION}"
-        )
-    # 5) 数据集名称是否匹配
-    if marker.get("dataset_name") != dataset_name:
-        errors.append(
-            f"完成标记数据集不匹配 {complete_path}: "
-            f"{marker.get('dataset_name')} != {dataset_name}"
-        )
-    # 6) 缓存图像数量是否匹配
-    if int(marker.get("num_cached_images", -1)) != int(expected_num_images):
-        errors.append(
-            f"缓存图像数量不匹配 {complete_path}: "
-            f"{marker.get('num_cached_images')} != {expected_num_images}"
-        )
-    return len(errors) == 0, errors
-
-
-# 对外检查接口：验证索引与缓存是否齐备
-def check_lmdb_cache_ready(
-    data_split_folder: str,
-    dataset_name: str,
-    min_dist_cat: int,
-    max_dist_cat: int,
-    waypoint_spacing: int,
-    context_type: str,
-    context_size: int,
-    end_slack: int,
-) -> Tuple[bool, List[str]]:
-    # 先检查索引文件，再检查 LMDB 缓存
-    index_path = get_dataset_index_path(
-        data_split_folder,
-        min_dist_cat,
-        max_dist_cat,
-        waypoint_spacing,
-        context_type,
-        context_size,
-        end_slack,
-    )
-    cache_path, complete_path = get_lmdb_cache_paths(data_split_folder, dataset_name)
-    # 索引文件缺失直接返回错误
-    if not os.path.exists(index_path):
-        return False, [f"缺少数据集索引: {index_path}"]
-
-    # 索引文件存在时读取期望数量
-    try:
-        expected_num_images = _load_expected_lmdb_count(index_path)
-    except Exception as exc:
-        return False, [f"加载数据集索引失败 {index_path}: {exc}"]
-
-    return _validate_lmdb_cache(cache_path, complete_path, dataset_name, expected_num_images)
+from training_base.data.indexing import (
+    build_navigation_index,
+    get_dataset_index_path,
+    load_or_build_navigation_index,
+)
+from training_base.data.labeling import compute_navigation_actions, context_entries, sample_goal
+from training_base.data.lmdb_cache import build_or_open_lmdb_cache, check_lmdb_cache_ready
 
 
 # 核心数据集类：负责采样、标签构造与图像缓存读取
@@ -205,7 +58,7 @@ class NavigationDataset(Dataset):
             len_traj_pred: int,  # 预测轨迹长度（航点数量）
             learn_angle: bool,  # 是否学习航向角
             context_size: int,  # 历史上下文帧数
-            context_type: str = "temporal",  # 上下文类型：temporal/randomized/randomized_temporal
+            context_type: str = "temporal",  # 上下文类型：当前实现只支持 temporal
             end_slack: int = 0,  # 轨迹末端忽略步数
             goals_per_obs: int = 1,  # 每个观测采样目标数
             normalize: bool = True,  # 是否按米制间隔归一化动作
@@ -217,6 +70,7 @@ class NavigationDataset(Dataset):
             lmdb_max_readers: int = 512,  # 允许更多 DataLoader worker 同时读取 LMDB
             lmdb_cache_mode: str = "auto",  # auto=缺失时构建；read=只读已完成缓存；build=只构建/补齐缓存
             rebuild_incomplete_lmdb: bool = False,  # True 时删除未完成/不匹配的 LMDB 后重建
+            data_config_path: str = None,  # 数据集元信息配置；默认使用包内 data_config.yaml
     ):
         """
         Navigation dataset class - used to train visual navigation models
@@ -274,9 +128,7 @@ class NavigationDataset(Dataset):
                 0表示不使用历史上下文（仅当前帧）
 
             context_type (str): 上下文类型
-                "temporal": 时序上下文（使用最近的N帧）
-                "randomized": 随机采样上下文
-                "randomized_temporal": 随机时序上下文
+                "temporal": 时序上下文（使用最近的N帧）；当前实现只支持该值
 
             end_slack (int): 轨迹末端忽略的时间步数
                 因为很多轨迹以碰撞结束，需要裁剪末端
@@ -338,11 +190,8 @@ class NavigationDataset(Dataset):
         # ========== 上下文配置 ==========
         # context_size 为历史帧数量，context_type 控制采样策略
         self.context_size = context_size
-        assert context_type in {
-            "temporal",
-            "randomized",
-            "randomized_temporal",
-        }, "context_type 必须是 temporal、randomized 或 randomized_temporal 之一"
+        if context_type != "temporal":
+            raise ValueError(f"data.context_type 当前只支持 temporal，实际为 {context_type!r}")
         self.context_type = context_type
 
         # ========== 其他配置 ==========
@@ -365,13 +214,13 @@ class NavigationDataset(Dataset):
         # ========== 加载数据集配置 ==========
         # data_config.yaml 记录每个数据集的统计信息
         # 从data_config.yaml加载数据集特定参数（如metric_waypoint_spacing）
-        with open(
-                os.path.join(os.path.dirname(__file__), "data_config.yaml"), "r"
-        ,encoding="utf-8") as f:
+        data_config_path = data_config_path or os.path.join(os.path.dirname(__file__), "data_config.yaml")
+        if not os.path.isabs(data_config_path):
+            data_config_path = os.path.abspath(data_config_path)
+        with open(data_config_path, "r", encoding="utf-8") as f:
             all_data_config = yaml.safe_load(f)
-        assert (
-                self.dataset_name in all_data_config
-        ), f"在 data_config.yaml 中找不到数据集 {self.dataset_name}"
+        if self.dataset_name not in all_data_config:
+            raise KeyError(f"在数据集配置 {data_config_path} 中找不到数据集 {self.dataset_name}")
 
         # 获取数据集索引（用于多数据集训练时的标识）
         dataset_names = list(all_data_config.keys())
@@ -428,108 +277,18 @@ class NavigationDataset(Dataset):
         参数:
             use_tqdm (bool): 是否显示进度条
         """
-        # 计算缓存路径与校验文件路径
-        cache_filename, complete_filename = get_lmdb_cache_paths(
-            self.data_split_folder,
-            self.dataset_name,
-        )
-        # goals_index 的长度即需缓存的图像数量
-        expected_num_images = len(self.goals_index)
-        # 检查已有缓存是否完整
-        cache_ready, cache_errors = _validate_lmdb_cache(
-            cache_filename,
-            complete_filename,
-            self.dataset_name,
-            expected_num_images,
-        )
-
-        # build 模式强制构建；auto 模式在缺失时构建
-        should_build = self.lmdb_cache_mode == "build" or (
-            self.lmdb_cache_mode == "auto" and not cache_ready
-        )
-        # read 模式要求缓存必须完整，否则直接报错
-        if self.lmdb_cache_mode == "read" and not cache_ready:
-            joined_errors = "\n  - ".join(cache_errors)
-            raise RuntimeError(
-                "LMDB 缓存缺失或不完整，但 lmdb_cache_mode='read'。\n"
-                f"数据集: {self.dataset_name}\n"
-                f"划分目录: {self.data_split_folder}\n"
-                f"问题:\n  - {joined_errors}\n"
-                "请运行: python -m training_base.cli -c <config> --build-lmdb-only"
-            )
-
-        # 需要构建且缓存不完整时执行重建逻辑
-        if should_build and not cache_ready:
-            if _path_exists(cache_filename) or os.path.exists(complete_filename):
-                # 已存在残留缓存时按配置决定是否清理
-                if not self.rebuild_incomplete_lmdb:
-                    joined_errors = "\n  - ".join(cache_errors)
-                    raise RuntimeError(
-                        "发现不完整或未经校验的 LMDB 缓存。\n"
-                        f"数据集: {self.dataset_name}\n"
-                        f"划分目录: {self.data_split_folder}\n"
-                        f"问题:\n  - {joined_errors}\n"
-                        "如需安全重建，请重新运行时加 --rebuild-incomplete-lmdb，"
-                        "或设置 rebuild_incomplete_lmdb: True。"
-                    )
-                _remove_path(cache_filename)
-                if os.path.exists(complete_filename):
-                    os.remove(complete_filename)
-
-            # 使用临时缓存文件写入，完成后再原子重命名
-            tmp_cache_filename = f"{cache_filename}.tmp.{os.getpid()}"
-            _remove_path(tmp_cache_filename)
-            tqdm_iterator = tqdm.tqdm(
-                self.goals_index,
-                disable=not use_tqdm,
-                dynamic_ncols=True,
-                desc=f"正在为 {self.dataset_name} 构建 LMDB 缓存"
-            )
-            # 写入阶段使用临时 LMDB，全部成功后再原子重命名，避免中断后留下“看似存在但不完整”的缓存。
-            num_cached_images = 0
-            # map_size 预留较大空间，避免中途扩容失败
-            with lmdb.open(tmp_cache_filename, map_size=2 ** 40) as image_cache:
-                with image_cache.begin(write=True) as txn:
-                    for traj_name, time in tqdm_iterator:
-                        image_path = get_data_path(self.data_folder, traj_name, time)
-                        # 读取图像文件并存储到LMDB
-                        with open(image_path, "rb") as f:
-                            txn.put(image_path.encode(), f.read())
-                        num_cached_images += 1
-                image_cache.sync()
-
-            # 缓存数量不匹配直接丢弃临时缓存
-            if num_cached_images != expected_num_images:
-                _remove_path(tmp_cache_filename)
-                raise RuntimeError(
-                    f"{self.dataset_name} 的 LMDB 构建数量不匹配: "
-                    f"{num_cached_images} != {expected_num_images}"
-                )
-
-            # 原子替换为正式缓存文件
-            os.rename(tmp_cache_filename, cache_filename)
-            marker = {
-                "version": LMDB_CACHE_VERSION,
-                "dataset_name": self.dataset_name,
-                "num_cached_images": num_cached_images,
-                "cache_path": cache_filename,
-            }
-            # 写入完成标记，用于后续校验
-            with open(complete_filename, "w", encoding="utf-8") as f:
-                json.dump(marker, f, ensure_ascii=False, indent=2)
-
-        elif should_build and cache_ready:
-            # 已有完整缓存则直接复用
-            print(f"{self.dataset_name} 的 LMDB 缓存已完整: {cache_filename}")
-
-        # 以只读模式重新打开缓存文件；这些参数只影响读取性能，不改变读取到的数据内容。
-        self._image_cache: lmdb.Environment = lmdb.open(
-            cache_filename,
-            readonly=True,
-            lock=self.lmdb_lock,
-            readahead=self.lmdb_readahead,
-            meminit=self.lmdb_meminit,
-            max_readers=self.lmdb_max_readers,
+        self._image_cache = build_or_open_lmdb_cache(
+            data_folder=self.data_folder,
+            data_split_folder=self.data_split_folder,
+            dataset_name=self.dataset_name,
+            goals_index=self.goals_index,
+            lmdb_lock=self.lmdb_lock,
+            lmdb_readahead=self.lmdb_readahead,
+            lmdb_meminit=self.lmdb_meminit,
+            lmdb_max_readers=self.lmdb_max_readers,
+            lmdb_cache_mode=self.lmdb_cache_mode,
+            rebuild_incomplete_lmdb=self.rebuild_incomplete_lmdb,
+            use_tqdm=use_tqdm,
         )
 
     def _build_index(self, use_tqdm: bool = False):
@@ -546,35 +305,16 @@ class NavigationDataset(Dataset):
             samples_index: 训练样本索引列表
             goals_index: 目标候选索引列表
         """
-        samples_index = []
-        goals_index = []
-
-        # 遍历每条轨迹并构建索引
-        for traj_name in tqdm.tqdm(self.traj_names, disable=not use_tqdm, dynamic_ncols=True):
-            traj_data = self._get_trajectory(traj_name)
-            traj_len = len(traj_data["position"])
-
-            # 将轨迹中的每个时间步添加到goals_index
-            # 这些是潜在的目标候选
-            # goals_index 覆盖该轨迹的所有时间步
-            for goal_time in range(0, traj_len):
-                goals_index.append((traj_name, goal_time))
-
-            # 计算有效的观测时间范围
-            # begin_time: 必须有足够的历史上下文
-            # 起点必须保证历史上下文可用
-            begin_time = self.context_size * self.waypoint_spacing
-            # end_time: 必须有足够的未来轨迹用于预测和目标采样
-            end_time = traj_len - self.end_slack - self.len_traj_pred * self.waypoint_spacing
-
-            # 遍历可用的当前时间步
-            for curr_time in range(begin_time, end_time):
-                # 计算从当前时间可以采样的最大目标距离
-                # 不能超过轨迹末端
-                max_goal_distance = min(self.max_dist_cat * self.waypoint_spacing, traj_len - curr_time - 1)
-                samples_index.append((traj_name, curr_time, max_goal_distance))
-
-        return samples_index, goals_index
+        return build_navigation_index(
+            traj_names=self.traj_names,
+            get_trajectory=self._get_trajectory,
+            context_size=self.context_size,
+            waypoint_spacing=self.waypoint_spacing,
+            len_traj_pred=self.len_traj_pred,
+            end_slack=self.end_slack,
+            max_dist_cat=self.max_dist_cat,
+            use_tqdm=use_tqdm,
+        )
 
     def _sample_goal(self, trajectory_name, curr_time, max_goal_dist):
         """
@@ -595,31 +335,7 @@ class NavigationDataset(Dataset):
             - goal_time: 目标时间步
             - goal_is_negative: 是否为负样本
         """
-        # 在 [0, max_goal_dist] 中均匀采样目标偏移
-        goal_offset = np.random.randint(0, max_goal_dist + 1)
-        if goal_offset == 0:
-            # 采样负样本（来自可能不同的轨迹）
-            trajectory_name, goal_time = self._sample_negative()
-            return trajectory_name, goal_time, True
-        else:
-            # 采样同一轨迹的未来目标
-            goal_time = curr_time + int(goal_offset * self.waypoint_spacing)
-            return trajectory_name, goal_time, False
-
-    def _sample_negative(self):
-        """
-        从（可能）不同的轨迹中采样一个目标
-
-        负样本挖掘的作用：
-        - 训练模型识别不可达的目标
-        - 提升模型的鲁棒性
-        - 避免模型对所有目标都输出"前进"
-
-        返回:
-            (trajectory_name, goal_time): 随机采样的目标
-        """
-        # 从全局 goals_index 随机抽取一个目标
-        return self.goals_index[np.random.randint(0, len(self.goals_index))]
+        return sample_goal(trajectory_name, curr_time, max_goal_dist, self.waypoint_spacing, self.goals_index)
 
     def _load_index(self) -> None:
         """
@@ -645,25 +361,10 @@ class NavigationDataset(Dataset):
             self.context_size,
             self.end_slack,
         )
-        # 索引存在时直接加载，避免重复构建
-        if os.path.exists(index_to_data_path):
-            try:
-                # 尝试加载已存在的索引（节省时间）
-                with open(index_to_data_path, "rb") as f:
-                    self.index_to_data, self.goals_index = pickle.load(f)
-                return
-            except (OSError, EOFError, pickle.PickleError, ValueError, AttributeError) as exc:
-                raise RuntimeError(
-                    "加载数据集索引失败。请检查数据划分和参数后，删除或重建索引文件: "
-                    f"{index_to_data_path}"
-                ) from exc
-
-        # 如果索引文件不存在，创建它
-        if not os.path.exists(index_to_data_path):
-            # 构建索引并持久化到磁盘
-            self.index_to_data, self.goals_index = self._build_index()
-            with open(index_to_data_path, "wb") as f:
-                pickle.dump((self.index_to_data, self.goals_index), f)
+        self.index_to_data, self.goals_index = load_or_build_navigation_index(
+            index_path=index_to_data_path,
+            build_fn=self._build_index,
+        )
 
     def _load_image(self, trajectory_name, time):
         """
@@ -698,7 +399,7 @@ class NavigationDataset(Dataset):
                 f"无法从数据集 '{self.dataset_name}' 的 LMDB 缓存读取图像: {image_path}"
             ) from exc
 
-    def _compute_actions(self, traj_data, curr_time, goal_time):
+    def _compute_actions(self, traj_data, curr_time, goal_time, trajectory_name):
         """
         计算从当前位置到目标的动作序列（局部坐标系）
 
@@ -718,60 +419,19 @@ class NavigationDataset(Dataset):
             actions: 动作序列 [len_traj_pred, num_action_params]
             goal_pos: 目标在局部坐标系中的位置 [2]
         """
-        # 提取动作序列的起止索引
-        start_index = curr_time
-        # 末端包含 len_traj_pred + 1 个点（含当前点）
-        end_index = curr_time + self.len_traj_pred * self.waypoint_spacing + 1
-
-        # 提取航向和位置序列（按 waypoint_spacing 下采样）
-        yaw = traj_data["yaw"][start_index:end_index:self.waypoint_spacing]
-        positions = traj_data["position"][start_index:end_index:self.waypoint_spacing]
-        # 目标位置取 goal_time 处（越界则取最后一个）
-        goal_pos = traj_data["position"][min(goal_time, len(traj_data["position"]) - 1)]
-
-        # 处理航向维度
-        if len(yaw.shape) == 2:
-            yaw = yaw.squeeze(1)
-
-        # 如果序列长度不足，用最后一个值填充
-        if yaw.shape != (self.len_traj_pred + 1,):
-            const_len = self.len_traj_pred + 1 - yaw.shape[0]
-            yaw = np.concatenate([yaw, np.repeat(yaw[-1], const_len)])
-            positions = np.concatenate([positions, np.repeat(positions[-1][None], const_len, axis=0)], axis=0)
-
-        # 验证形状
-        assert yaw.shape == (self.len_traj_pred + 1,), f"{yaw.shape} 与 {(self.len_traj_pred + 1,)} 应相等"
-        assert positions.shape == (self.len_traj_pred + 1,
-                                   2), f"{positions.shape} 与 {(self.len_traj_pred + 1, 2)} 应相等"
-
-        # 转换到局部坐标系（以当前位置和朝向为参考）
-        # 这使得动作与机器人的绝对位置和朝向无关
-        waypoints = to_local_coords(positions, positions[0], yaw[0])
-        goal_pos = to_local_coords(goal_pos, positions[0], yaw[0])
-
-        assert waypoints.shape == (self.len_traj_pred + 1,
-                                   2), f"{waypoints.shape} 与 {(self.len_traj_pred + 1, 2)} 应相等"
-
-        # 构建动作序列
-        if self.learn_angle:
-            # 计算相对航向角（相对于当前朝向）
-            yaw = yaw[1:] - yaw[0]
-            # 拼接位置和航向：[x, y, yaw]
-            actions = np.concatenate([waypoints[1:], yaw[:, None]], axis=-1)
-        else:
-            # 仅使用位置：[x, y]
-            actions = waypoints[1:]
-
-        # 归一化动作（除以实际的米制距离）
-        if self.normalize:
-            # metric_waypoint_spacing: 数据集中航点之间的实际距离（米）
-            actions[:, :2] /= self.data_config["metric_waypoint_spacing"] * self.waypoint_spacing
-            goal_pos /= self.data_config["metric_waypoint_spacing"] * self.waypoint_spacing
-
-        assert actions.shape == (self.len_traj_pred,
-                                 self.num_action_params), f"{actions.shape} 与 {(self.len_traj_pred, self.num_action_params)} 应相等"
-
-        return actions, goal_pos
+        return compute_navigation_actions(
+            traj_data=traj_data,
+            curr_time=curr_time,
+            goal_time=goal_time,
+            len_traj_pred=self.len_traj_pred,
+            waypoint_spacing=self.waypoint_spacing,
+            learn_angle=self.learn_angle,
+            normalize=self.normalize,
+            metric_waypoint_spacing=float(self.data_config["metric_waypoint_spacing"]),
+            num_action_params=self.num_action_params,
+            dataset_name=self.dataset_name,
+            trajectory_name=trajectory_name,
+        )
 
     def _get_trajectory(self, trajectory_name):
         """
@@ -844,23 +504,13 @@ class NavigationDataset(Dataset):
 
         # ========== 2. 加载上下文观测图像 ==========
         # context 列表保存 (traj_name, time) 的采样对
-        context = []
-        if self.context_type == "temporal":
-            # 时序上下文：采样最近context_size帧历史并包含当前帧（共context_size+1帧）
-            # 例如：context_size=5, curr_time=10, waypoint_spacing=1
-            # 则采样时间: [5, 6, 7, 8, 9, 10]
-            # 计算历史帧时间序列（包含当前帧）
-            context_times = list(
-                range(
-                    curr_time + -self.context_size * self.waypoint_spacing,
-                    curr_time + 1,
-                    self.waypoint_spacing,
-                )
-            )
-            # 每个时间步都绑定当前轨迹名，后续逐帧读取图像
-            context = [(f_curr, t) for t in context_times]
-        else:
-            raise ValueError(f"无效的 context_type: {self.context_type}")
+        context = context_entries(
+            self.context_type,
+            f_curr,
+            curr_time,
+            self.context_size,
+            self.waypoint_spacing,
+        )
 
         # 拼接所有上下文图像（包括当前观测）
         # 形状: [3*(context_size+1), H, W]
@@ -878,18 +528,24 @@ class NavigationDataset(Dataset):
         # 获取当前轨迹与目标轨迹（可能相同也可能不同）
         curr_traj_data = self._get_trajectory(f_curr)
         curr_traj_len = len(curr_traj_data["position"])
-        assert curr_time < curr_traj_len, f"当前时间 {curr_time} 必须小于当前轨迹长度 {curr_traj_len}"
+        if curr_time >= curr_traj_len:
+            raise ValueError(
+                f"{self.dataset_name}:{f_curr} 当前时间 {curr_time} 必须小于当前轨迹长度 {curr_traj_len}"
+            )
 
         goal_traj_data = self._get_trajectory(f_goal)
         goal_traj_len = len(goal_traj_data["position"])
-        assert goal_time < goal_traj_len, f"目标时间 {goal_time} 必须小于目标轨迹长度 {goal_traj_len}"
+        if goal_time >= goal_traj_len:
+            raise ValueError(
+                f"{self.dataset_name}:{f_goal} 目标时间 {goal_time} 必须小于目标轨迹长度 {goal_traj_len}"
+            )
 
         # ========== 计算动作标签 ==========
         # actions: [len_traj_pred, num_action_params] 局部坐标系下的航点序列
 
         # goal_pos: [2] 目标在当前机器人局部坐标系中的位置
         # 注意：动作与 goal_pos 仅依赖当前轨迹与目标时间
-        actions, goal_pos = self._compute_actions(curr_traj_data, curr_time, goal_time)
+        actions, goal_pos = self._compute_actions(curr_traj_data, curr_time, goal_time, f_curr)
 
         # ========== 计算距离标签 ==========
         if goal_is_negative:
@@ -899,8 +555,11 @@ class NavigationDataset(Dataset):
         else:
             # 正样本：计算实际距离（航点数）
             distance = (goal_time - curr_time) // self.waypoint_spacing
-            assert (
-                               goal_time - curr_time) % self.waypoint_spacing == 0, f"goal_time={goal_time} 与 curr_time={curr_time} 的间隔必须是 waypoint_spacing={self.waypoint_spacing} 的整数倍"
+            if (goal_time - curr_time) % self.waypoint_spacing != 0:
+                raise ValueError(
+                    f"{self.dataset_name}:{f_curr}->{f_goal} 的 goal_time={goal_time} 与 "
+                    f"curr_time={curr_time} 间隔必须是 waypoint_spacing={self.waypoint_spacing} 的整数倍"
+                )
 
         # ========== 处理动作标签 ==========
         # numpy -> torch，并按需转换角度表示

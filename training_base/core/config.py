@@ -54,6 +54,22 @@ LEGACY_RUNTIME_LOGGING_FIELD_PATHS = (
 )
 
 
+LOGGING_SCHEDULE_PATHS = (
+    ("logging.train.metrics", ("logging", "train", "metrics")),
+    ("logging.train.behavior", ("logging", "train", "behavior")),
+    ("logging.train.optim", ("logging", "train", "optim")),
+    ("logging.train.param_norm", ("logging", "train", "param_norm")),
+    ("logging.eval.schedule", ("logging", "eval", "schedule")),
+    ("logging.eval.behavior", ("logging", "eval", "behavior")),
+    ("logging.media.train", ("logging", "media", "train")),
+    ("logging.media.eval", ("logging", "media", "eval")),
+    ("logging.runtime.perf", ("logging", "runtime", "perf")),
+    ("logging.system.gpu", ("logging", "system", "gpu")),
+)
+
+LOGGING_UNITS = {"step", "epoch", "eval"}
+
+
 def _set_nested_if_missing(mapping: Dict[str, Any], path: Sequence[str], value: Any) -> None:
     current = mapping
     for key in path[:-1]:
@@ -96,6 +112,31 @@ def _coerce_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _validate_positive_int(value: Any, field_name: str) -> None:
+    if int(value) <= 0:
+        raise ValueError(f"{field_name} 必须是正整数，实际为 {value!r}")
+
+
+def _validate_non_negative_int(value: Any, field_name: str) -> None:
+    if int(value) < 0:
+        raise ValueError(f"{field_name} 必须是非负整数，实际为 {value!r}")
+
+
+def _validate_logging_schedules(config: Dict[str, Any]) -> None:
+    for field_name, path in LOGGING_SCHEDULE_PATHS:
+        section = _nested_get(config, path)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            raise TypeError(f"{field_name} 必须是映射/字典")
+        if "unit" in section and str(section["unit"]).lower() not in LOGGING_UNITS:
+            raise ValueError(f"{field_name}.unit 必须是 step、epoch 或 eval 之一，实际为 {section['unit']!r}")
+        if "freq" in section:
+            _validate_non_negative_int(section["freq"], f"{field_name}.freq")
+        if "start_step" in section:
+            _validate_non_negative_int(section["start_step"], f"{field_name}.start_step")
 
 
 def _move_nested_fields(mapping: Dict[str, Any], source: Sequence[str], target: Sequence[str], fields: Sequence[str], default_unit: str = "step") -> None:
@@ -199,6 +240,39 @@ def validate_config(config: Dict[str, Any]) -> None:
     if not config["objective"].get("name"):
         raise KeyError("必须配置 objective.name")
 
+    runtime = config["runtime"]
+    data = config["data"]
+    logging_config = config["logging"]
+
+    _validate_positive_int(runtime.get("epochs", 0), "runtime.epochs")
+    _validate_positive_int(runtime.get("batch_size", 0), "runtime.batch_size")
+    _validate_positive_int(runtime.get("eval_batch_size", runtime.get("batch_size", 0)), "runtime.eval_batch_size")
+    _validate_non_negative_int(runtime.get("num_workers", 0), "runtime.num_workers")
+    _validate_non_negative_int(runtime.get("test_num_workers", runtime.get("num_workers", 0)), "runtime.test_num_workers")
+
+    train_subset = float(runtime.get("train_subset", 1.0))
+    if not (0.0 < train_subset <= 1.0):
+        raise ValueError(f"runtime.train_subset 必须在 (0, 1] 范围内，实际为 {train_subset}")
+
+    global_batch_size = runtime.get("global_batch_size")
+    if global_batch_size is not None:
+        _validate_positive_int(global_batch_size, "runtime.global_batch_size")
+
+    if str(runtime.get("amp_dtype", "fp16")).lower() not in {"fp16", "bf16"}:
+        raise ValueError("runtime.amp_dtype 必须是 fp16 或 bf16")
+    if str(runtime.get("lmdb_cache_mode", "auto")).lower() not in {"auto", "read", "build"}:
+        raise ValueError("runtime.lmdb_cache_mode 必须是 auto、read 或 build 之一")
+
+    context_type = str(data.get("context_type", "temporal")).lower()
+    if context_type != "temporal":
+        raise ValueError("data.context_type 当前只支持 temporal")
+
+    eval_fraction_value = _nested_get(logging_config, ("eval", "schedule", "fraction"))
+    eval_fraction = float(1.0 if eval_fraction_value is None else eval_fraction_value)
+    if not (0.0 < eval_fraction <= 1.0):
+        raise ValueError(f"logging.eval.schedule.fraction 必须在 (0, 1] 范围内，实际为 {eval_fraction}")
+    _validate_logging_schedules(config)
+
 
 # 规范化配置：关键名称统一小写，并执行校验
 def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,6 +282,9 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
     config["model"]["name"] = str(config["model"]["name"]).lower()
     config["objective"]["name"] = str(config["objective"]["name"]).lower()
     config["optimizer"]["name"] = str(config["optimizer"]["name"]).lower()
+    config["data"]["context_type"] = str(config["data"].get("context_type", "temporal")).lower()
+    config["runtime"]["amp_dtype"] = str(config["runtime"].get("amp_dtype", "fp16")).lower()
+    config["runtime"]["lmdb_cache_mode"] = str(config["runtime"].get("lmdb_cache_mode", "auto")).lower()
     if config.get("scheduler") and config["scheduler"].get("name") is not None:
         config["scheduler"]["name"] = str(config["scheduler"]["name"]).lower()
     validate_config(config)

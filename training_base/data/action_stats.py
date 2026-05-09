@@ -7,7 +7,7 @@
 # 3. 将扩散模型输出反归一化并累积回绝对航点轨迹
 
 import os
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -37,11 +37,19 @@ def _coerce_action_stats(stats) -> dict:
 
 
 # 从配置或文件加载动作统计（min/max）
-def load_action_stats(config_stats: Optional[dict] = None, data_config_path: str = DEFAULT_DATA_CONFIG_PATH) -> dict:
+def load_action_stats(config_stats: Optional[Union[dict, str]] = None, data_config_path: str = DEFAULT_DATA_CONFIG_PATH) -> dict:
     # objective 中显式写 action_stats 时优先使用，便于针对特定数据集覆盖全局统计
     if config_stats is not None:
+        if isinstance(config_stats, str):
+            stats_path = config_stats if os.path.isabs(config_stats) else os.path.abspath(config_stats)
+            with open(stats_path, "r", encoding="utf-8-sig") as f:
+                loaded = yaml.safe_load(f)
+            return _coerce_action_stats(loaded.get("action_stats", loaded))
         return _coerce_action_stats(config_stats)
     # utf-8-sig 兼容带 BOM 的 YAML 文件
+    data_config_path = data_config_path or DEFAULT_DATA_CONFIG_PATH
+    if not os.path.isabs(data_config_path):
+        data_config_path = os.path.abspath(data_config_path)
     with open(data_config_path, "r", encoding="utf-8-sig") as f:
         data_config = yaml.safe_load(f)
     return _coerce_action_stats(data_config["action_stats"])

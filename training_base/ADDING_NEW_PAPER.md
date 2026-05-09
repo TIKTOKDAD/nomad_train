@@ -559,6 +559,9 @@ runtime:
 
 data:
   normalize: true
+  # 新数据集元信息默认从 training_base/data/data_config.yaml 读取；
+  # 如果新论文有独立数据配置，改成对应 YAML 路径。
+  data_config_path: null
   context_type: temporal
   context_size: 5
   image_size: [85, 64]
@@ -578,7 +581,6 @@ data:
       train: /path/to/recon/train
       test: /path/to/recon/test
       waypoint_spacing: 1
-      metric_waypoint_spacing: 0.25
       negative_mining: true
       goals_per_obs: 1
       end_slack: 0
@@ -691,6 +693,23 @@ callbacks:
   - name: perf_monitor
   - name: optim_monitor
 ```
+
+### 新数据集元信息和 action stats
+
+`data.datasets.<name>` 只描述数据路径和采样策略。数据集的 `metric_waypoint_spacing`、`camera_metrics` 以及 NoMaD 使用的 `action_stats` 默认放在 `training_base/data/data_config.yaml`。如果你不想改默认文件，可以新增一个 YAML，并在实验配置中写：
+
+```yaml
+data:
+  data_config_path: /path/to/my_data_config.yaml
+
+objective:
+  # NoMaD 可选：显式覆盖动作归一化统计；优先级高于 data_config_path
+  action_stats:
+    min: [-2.5, -4.0]
+    max: [5.0, 4.0]
+```
+
+优先级是：`objective.action_stats` 显式配置最高，其次是 `data.data_config_path`，最后才是默认的 `training_base/data/data_config.yaml`。可视化只消费 `NavigationDataModule` 注入的 `data.dataset_metadata`，不要在 visualizer 里重新读取全局数据配置。
 
 ### 4.7 运行命令
 

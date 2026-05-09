@@ -19,7 +19,7 @@ runtime:
   batch_size: 256
   # 评估 batch_size：测试 DataLoader 使用
   eval_batch_size: 256
-  # 训练 epoch 数
+  # 目标总 epoch 数；resume 后会继续训练到该总数，而不是额外追加这么多轮
   epochs: 100
   # GPU 列表：非 torchrun 时用于 CUDA_VISIBLE_DEVICES
   gpu_ids: [0]

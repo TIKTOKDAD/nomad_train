@@ -21,7 +21,7 @@ runtime:
   batch_size: 400
   # 评估批次大小
   eval_batch_size: 400
-  # 训练总 epoch 数
+  # 目标总 epoch 数；resume 后会继续训练到该总数，而不是额外追加这么多轮
   epochs: 30
   # 需要使用的 GPU ID 列表
   gpu_ids: [0]
@@ -93,7 +93,9 @@ runtime:
 data:
   # 是否对动作进行归一化
   normalize: true
-  # 上下文采样类型（temporal/randomized/...）
+  # 数据集元信息路径；null 表示使用 training_base/data/data_config.yaml
+  data_config_path: null
+  # 上下文采样类型（当前实现只支持 temporal）
   context_type: temporal
   # 上下文帧数（历史帧数量）
   context_size: 5

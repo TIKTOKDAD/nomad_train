@@ -6,6 +6,8 @@ For the full project requirements, design boundaries, directory responsibilities
 
 For a concrete Chinese step-by-step guide with a full new-paper example, see [ADDING_NEW_PAPER.md](ADDING_NEW_PAPER.md).
 
+For day-to-day commands, see [QUICKSTART.md](QUICKSTART.md). For extension interfaces, see [docs/extension_contract.md](docs/extension_contract.md).
+
 ## Layers
 
 ```text
@@ -60,6 +62,38 @@ trainer.py
 
 Offline maintenance utilities live under `utils/`, for example `utils/data_stats.py`.
 
+## Common Commands
+
+Build or repair LMDB caches in one process before distributed training:
+
+```bash
+python -m training_base.cli -c training_base/configs/nomad_retrain.yaml --build-lmdb-only
+python -m training_base.cli -c training_base/configs/nomad_retrain.yaml --build-lmdb-only --rebuild-incomplete-lmdb
+```
+
+Run single-process training:
+
+```bash
+python -m training_base.cli -c training_base/configs/nomad_retrain.yaml
+```
+
+Run DDP training after LMDB caches are complete:
+
+```bash
+torchrun --standalone --nproc_per_node=4 -m training_base.cli -c training_base/configs/nomad_retrain.yaml
+```
+
+Resume by setting `runtime.load_run` in the config. `runtime.epochs` is the
+target total epoch count, so a checkpoint saved at epoch 20 with
+`runtime.epochs: 100` resumes through epoch 99 rather than adding 100 more
+epochs.
+
+Set a W&B sink to `enabled: false` to disable W&B. Set `strict: true` only when
+logging failures should stop training; by default W&B failures warn and training
+continues. For stricter reproducibility, set `runtime.seed` and
+`runtime.deterministic: true`; this disables cuDNN benchmark and asks PyTorch to
+use deterministic algorithms where available.
+
 ## Registries
 
 `core/registry.py` defines the small `Registry` class.
@@ -109,7 +143,14 @@ the input/output protocol genuinely changes.
 
 New runs are saved in the `training_base` checkpoint schema with
 `checkpoint_schema_version`, `model`, `optimizer`, `scheduler`,
-`algorithm_state`, `config`, `global_step`, and `eval_summaries`.
+`algorithm_state`, `callback_state`, `config`, `global_step`,
+`eval_summaries`, and `rng_state`.
+`latest.pth` and the auxiliary latest files are written through a temp file and
+atomic replace; an existing latest file is kept as `*.backup.pth`.
+
+Recovery is epoch-level. Checkpoints restore Python, NumPy, Torch CPU, and CUDA
+RNG state when the field is present. Older checkpoints without `rng_state` still
+load, but strict replay after resume is not guaranteed.
 
 Old GNM, ViNT, and NoMaD checkpoints are read-only compatible where the legacy
 module names are known. Loading reports missing and unexpected model keys after

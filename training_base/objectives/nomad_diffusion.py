@@ -36,7 +36,7 @@ class NoMaDDiffusionObjective:
         self.distance_mask_mode = str(config.get("distance_mask_mode", "per_sample")).lower()
         if self.distance_mask_mode not in {"per_sample", "legacy_scalar"}:
             raise ValueError("objective.distance_mask_mode 必须是 per_sample 或 legacy_scalar 之一")
-        self.action_stats = load_action_stats(config.get("action_stats"))
+        self.action_stats = load_action_stats(config.get("action_stats"), data_config_path=config.get("data_config_path"))
         losses = config.get("losses", {})
         # distance/diffusion 两个子损失可分别配置，但默认都用 MSE
         self.distance_loss = get_configured_loss(losses, "distance", "mse")

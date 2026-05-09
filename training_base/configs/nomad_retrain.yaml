@@ -28,7 +28,7 @@ runtime:
   batch_size: 256
   # 评估批次大小
   eval_batch_size: 256
-  # 训练 epoch 数
+  # 目标总 epoch 数；resume 后会继续训练到该总数，而不是额外追加这么多轮
   epochs: 100
   # 使用的 GPU 列表：torchrun 外层应与该列表保持一致
   gpu_ids: [0, 1, 2, 3]
@@ -98,7 +98,9 @@ runtime:
 data:
   # 是否对动作归一化：NoMaD diffusion 会再基于 action_stats 处理动作增量
   normalize: true
-  # 上下文采样类型
+  # 数据集元信息路径；null 表示使用 training_base/data/data_config.yaml
+  data_config_path: null
+  # 上下文采样类型（当前实现只支持 temporal）
   context_type: temporal
   # 上下文帧数
   context_size: 3
@@ -467,6 +469,8 @@ logging:
     - name: wandb
       # 是否启用 wandb
       enabled: true
+      # false 表示 W&B 网络/登录失败只告警，不中断训练
+      strict: false
       # wandb 实体/组织
       entity: 1948627929-university-of-central-florida
 

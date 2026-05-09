@@ -224,7 +224,8 @@ def calculate_sin_cos(waypoints: torch.Tensor) -> torch.Tensor:
         - 训练时将角度转换为sin/cos
         - 推理时从sin/cos恢复角度
     """
-    assert waypoints.shape[1] == 3, "输入必须是3维 (x, y, θ)"
+    if len(waypoints.shape) != 2 or waypoints.shape[1] != 3:
+        raise ValueError(f"输入必须是二维张量且最后一维为 3 (x, y, θ)，实际形状为 {tuple(waypoints.shape)}")
     
     # 创建角度表示张量
     angle_repr = torch.zeros_like(waypoints[:, :2])

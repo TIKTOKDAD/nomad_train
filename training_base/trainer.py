@@ -12,6 +12,7 @@ import torch
 import tqdm
 
 from training_base.callbacks import CallbackManager
+from training_base.core.checkpoint import restore_rng_state
 from training_base.loggers import Recorder
 from training_base.loggers.key_format import format_metric_logs
 from training_base.loggers.schedule import build_logging_schedules
@@ -301,24 +302,38 @@ class Trainer:
         # 断点恢复：加载模型/优化器状态，并恢复全局步数
         resume_state = self.algorithm.prepare_resume(model=model, optimizer=optimizer, scheduler=scheduler, config=self.config, device=self.context.device)
         self.global_step = int((resume_state.extra or {}).get("global_step", 0))
+        if isinstance(resume_state.latest_checkpoint, dict):
+            self.callbacks.load_state_dict(resume_state.latest_checkpoint.get("callback_state", {}))
 
         # 设备转移与分布式封装
         # 顺序很关键：先把模型搬到 device，再包 DDP，再创建算法状态/EMA
         model = model.to(self.context.device)
         model = wrap_distributed_model(model, runtime, self.context)
         state = self.algorithm.create_state(model, model_extras, objective, self.config, self.context.device, resume_state)
+        if isinstance(resume_state.latest_checkpoint, dict):
+            restore_rng_state(resume_state.latest_checkpoint.get("rng_state"), path=resume_state.load_project_folder or "<checkpoint>")
 
         # AMP 梯度缩放器（仅在 CUDA + AMP 时启用）
         grad_scaler = make_grad_scaler(self.context.device, bool(runtime.get("amp", False)), bool(runtime.get("use_grad_scaler", True)))
-        end_epoch = resume_state.current_epoch + int(runtime["epochs"])
+        # runtime.epochs 表示目标总 epoch 数；resume 后继续跑到该总数，而不是额外追加 epochs 轮。
+        end_epoch = int(runtime["epochs"])
 
         try:
+            if resume_state.current_epoch >= end_epoch:
+                if self.context.is_main_process:
+                    print(
+                        f"恢复点已经到达目标训练轮次: current_epoch={resume_state.current_epoch}, "
+                        f"runtime.epochs={end_epoch}。无需继续训练。"
+                    )
+                return
             # 训练与评估主循环
             # eval_index 是 1-based 的 eval 事件计数；断点恢复时从已完成 epoch 推导，保持 unit=eval 的节奏稳定
             eval_index = sum(1 for completed_epoch in range(resume_state.current_epoch) if schedules.should_eval_epoch(completed_epoch))
             for epoch in range(resume_state.current_epoch, end_epoch):
                 # 分布式训练时需要为采样器设置 epoch 保证洗牌一致
-                if self.datamodule.train_sampler is not None:
+                if hasattr(self.datamodule, "set_train_epoch"):
+                    self.datamodule.set_train_epoch(epoch)
+                elif self.datamodule.train_sampler is not None:
                     self.datamodule.train_sampler.set_epoch(epoch)
 
                 # 训练阶段
@@ -345,6 +360,8 @@ class Trainer:
                 # 默认只在主进程评估；distributed_eval=True 时每个进程评估自己的子集再聚合
                 if should_eval and (self.context.is_main_process or (self.context.distributed and distributed_eval)):
                     eval_index += 1
+                    if hasattr(self.datamodule, "set_eval_epoch"):
+                        self.datamodule.set_eval_epoch(eval_index)
                     for dataset_type, loader in self.datamodule.test_dataloaders.items():
                         if self.context.is_main_process:
                             print(f"开始 {dataset_type} 测试轮次 {epoch}/{end_epoch - 1}")
@@ -381,6 +398,7 @@ class Trainer:
                     state=state,
                     config=self.config,
                     eval_summaries=eval_summaries,
+                    callback_manager=self.callbacks,
                 )
                 # 进程同步，避免不同步进入下一轮
                 distributed_barrier()
