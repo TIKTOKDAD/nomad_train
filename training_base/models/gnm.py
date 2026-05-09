@@ -10,6 +10,8 @@ from typing import Optional, Tuple
 import torch
 
 from training_base.models.base import BaseModel
+from training_base.models import ModelBuild
+from training_base.registry import model_registry, module_registry
 
 
 # GNM 模型：编码器 + 预测头
@@ -37,3 +39,36 @@ class GNM(BaseModel):
         features = self.encoder(obs_img, goal_img)
         # 返回 dist_pred [B,1] 与 action_pred [B,T,D]
         return self.head(features)
+
+
+@model_registry.register("gnm")
+def build_gnm(config) -> ModelBuild:
+    data = config["data"]
+    model_config = config["model"]
+    # encoder_config 从 model 顶层继承，再叠加 model.encoder，兼容旧配置和平铺配置
+    encoder_config = dict(model_config)
+    if "encoder" in model_config:
+        encoder_config.update(model_config["encoder"])
+        encoder_name = encoder_config.get("name", "gnm_encoder")
+    else:
+        encoder_name = "gnm_encoder"
+    # GNM encoder 输出融合特征，head 再根据数据配置决定轨迹长度和动作维度
+    encoder = module_registry.build(encoder_name, encoder_config, data)
+    head = module_registry.build(
+        model_config.get("head", {}).get("name", "waypoint_head"),
+        {
+            "input_dim": encoder.output_dim,
+            "len_traj_pred": data["len_traj_pred"],
+            "num_action_params": 4 if data["learn_angle"] else 2,
+            "learn_angle": data["learn_angle"],
+        },
+    )
+    # 外壳模型只保存 encoder/head，不在内部重复解析 config
+    model = GNM(
+        context_size=data["context_size"],
+        len_traj_pred=data["len_traj_pred"],
+        learn_angle=data["learn_angle"],
+        encoder=encoder,
+        head=head,
+    )
+    return ModelBuild(model=model, extras={})

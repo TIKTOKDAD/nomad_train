@@ -1,13 +1,13 @@
-from training_base.modules.heads.distance_mlp import DistanceMLP
-from training_base.modules.heads.waypoint import WaypointPredictionHead
-from training_base.registry import module_registry
-
-
 # ============================================================
 # Head builders - waypoint and distance prediction heads
 # ============================================================
 # 本模块注册两类输出头：
 # waypoint_head 由配置字典构建，distance_mlp 直接以 embedding_dim 构建。
+
+from training_base.modules.heads.distance_mlp import DistanceMLP
+from training_base.modules.heads.waypoint import WaypointPredictionHead
+from training_base.registry import module_registry
+
 
 # 构建航点预测头
 def build_waypoint_head(config):

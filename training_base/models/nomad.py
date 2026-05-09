@@ -8,6 +8,9 @@
 
 import torch.nn as nn
 
+from training_base.models import ModelBuild
+from training_base.registry import model_registry, module_registry, noise_scheduler_registry
+
 
 # NoMaD 模型：由视觉编码器、扩散模型与距离预测器组成
 class NoMaD(nn.Module):
@@ -34,3 +37,28 @@ class NoMaD(nn.Module):
     def predict_distance(self, obsgoal_cond):
         # 距离头只看视觉条件，不直接消费动作序列
         return self.distance_predictor(obsgoal_cond)
+
+
+@model_registry.register("nomad")
+def build_nomad(config) -> ModelBuild:
+    model_config = config["model"]
+    # vision_encoder 需要同时知道模型参数和数据参数（例如 context_size、image_size）
+    vision_config = model_config["vision_encoder"]
+    vision_encoder = module_registry.build(vision_config["name"], vision_config, config["data"])
+    # diffusion 模块需要 global_cond_dim；未显式写时用视觉编码器输出维度兜底
+    diffusion_config = dict(model_config["diffusion"])
+    diffusion_config.setdefault("global_cond_dim", model_config["vision_encoder"]["encoding_size"])
+    diffusion_model = module_registry.build(model_config["diffusion"]["name"], diffusion_config)
+    # distance_predictor 是视觉条件上的距离头，独立于扩散动作头
+    distance_predictor = module_registry.build(
+        model_config["distance_predictor"]["name"],
+        model_config["distance_predictor"]["embedding_dim"],
+    )
+    model = NoMaD(
+        vision_encoder=vision_encoder,
+        diffusion_model=diffusion_model,
+        distance_predictor=distance_predictor,
+    )
+    # scheduler 不是 nn.Module，作为 extras 交给 NoMaDAlgorithm 管理
+    scheduler = noise_scheduler_registry.build(model_config["diffusion_scheduler"]["name"], model_config["diffusion_scheduler"])
+    return ModelBuild(model=model, extras={"noise_scheduler": scheduler})

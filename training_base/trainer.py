@@ -70,13 +70,17 @@ class Trainer:
         state,
         schedules,
     ):
+        # 单个训练 step 的核心路径：prepare batch -> forward/loss -> backward/step -> hook/log stats
         runtime = config["runtime"]
+        # 只有主进程且命中媒体日志频率时才准备可视化图片，减少无谓 resize
         should_images = self.context.is_main_process and schedules.should_log(schedules.media_train, epoch, num_batches, batch_idx)
         prepared = self._prepare_batch(batch, transform, device, mode="train", should_log_images=should_images, config=config)
 
+        # AMP 上下文由 runtime 配置控制，CPU 或关闭 AMP 时退化为普通上下文
         with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
             result = self.algorithm.train_step(model, prepared, state, config)
 
+        # 优化器统计可能需要额外遍历梯度/参数，因此单独按 schedule 控制
         should_optim_stats = self.context.is_main_process and schedules.should_log(
             schedules.train_optim,
             epoch,
@@ -89,6 +93,7 @@ class Trainer:
             num_batches,
             batch_idx,
         )
+        # scale_backward_step 封装 backward、梯度裁剪、optimizer.step 和 AMP scaler 更新
         optimizer_stats = scale_backward_step(
             result.loss,
             optimizer,
@@ -98,10 +103,12 @@ class Trainer:
             collect_stats=should_optim_stats,
             collect_param_norm=should_param_norm,
         )
+        # 算法和回调都可以在 optimizer.step 后维护额外状态，例如 NoMaD EMA
         self.algorithm.after_optimizer_step(model, state, config)
         self.callbacks.call("after_optimizer_step", model=model, algorithm=self.algorithm, state=state, config=config)
         self.global_step += 1
         if should_optim_stats or should_param_norm:
+            # 优化器健康指标只在主进程记录，避免 DDP 多 rank 重复写日志
             self.callbacks.call(
                 "log_optimizer_step",
                 recorder=self.recorder,
@@ -112,6 +119,7 @@ class Trainer:
         return prepared, result, should_images
 
     def _prepare_batch(self, batch, transform, device, *, mode: str, should_log_images: bool, config):
+        # 兼容旧 Algorithm.prepare_batch 签名：有些算法不接收 config 参数
         kwargs = {
             "batch": batch,
             "transform": transform,
@@ -124,10 +132,12 @@ class Trainer:
         return self.algorithm.prepare_batch(**kwargs)
 
     def _log_train_light_metrics(self, *, model, prepared, result, state, config, epoch, batch_idx, num_batches, schedules, metric_store, iterator, show_tqdm) -> None:
+        # 轻量指标跟随 train_metrics schedule，通常每 N step 写一次
         if not schedules.should_log(schedules.train_metrics, epoch, num_batches, batch_idx):
             return
         metric_logs = dict(result.logs)
         metric_logs.update(self.algorithm.light_metrics(model, prepared, result, state, config, mode="train"))
+        # DDP 下先跨 rank 平均，再写入主进程的 MetricStore
         metric_logs = reduce_metric_logs_distributed(metric_logs, self.context.device)
         if not self.context.is_main_process:
             return
@@ -142,9 +152,11 @@ class Trainer:
         )
 
     def _log_train_heavy_metrics(self, *, model, prepared, state, config, epoch, batch_idx, num_batches, schedules, heavy_store) -> None:
+        # 重指标只在主进程、命中 train_behavior schedule 时运行
         if not self.context.is_main_process or not schedules.should_log(schedules.train_behavior, epoch, num_batches, batch_idx):
             return
         with torch.inference_mode():
+            # 重指标不参与训练，使用 eval/EMA 模型并关闭梯度
             metric_model = self.algorithm.model_for_eval(model, state)
             metric_logs = self.algorithm.heavy_metrics(metric_model, prepared, state, config, mode="train")
         if not metric_logs:
@@ -158,9 +170,11 @@ class Trainer:
         )
 
     def _log_train_visualization(self, *, model, prepared, result, state, config, project_folder, epoch, batch_idx, num_batches, should_images) -> None:
+        # should_images 在 _run_train_step 中提前计算，避免算法重复判断 schedule
         if not should_images:
             return
         with torch.inference_mode():
+            # 可视化不影响训练状态，默认同样使用 eval/EMA 模型
             viz_model = self.algorithm.model_for_eval(model, state)
             self.algorithm.visualize(
                 model=viz_model,
@@ -178,6 +192,7 @@ class Trainer:
             )
 
     def _log_train_runtime_perf(self, *, result, device, epoch, batch_idx, num_batches, schedules, data_time, compute_time, step_time) -> None:
+        # 训练性能指标走回调系统，便于按需接入控制台/W&B/系统监控
         if schedules.should_log(schedules.runtime_perf, epoch, num_batches, batch_idx):
             self.callbacks.call(
                 "log_perf",
@@ -193,6 +208,7 @@ class Trainer:
                 global_step=self.global_step,
             )
         if schedules.should_system_gpu(epoch, num_batches, batch_idx):
+            # GPU 显存等系统信息单独由 system.gpu schedule 控制
             self.callbacks.call(
                 "log_system_gpu",
                 recorder=self.recorder,
@@ -201,19 +217,32 @@ class Trainer:
             )
 
     def _run_eval_step(self, *, eval_model, batch, transform, device, config, state, eval_type, should_images):
+        # 评估 step 与训练 step 共用 prepare_batch，保证图像预处理和标签搬运一致
         runtime = config["runtime"]
         prepared = self._prepare_batch(batch, transform, device, mode=eval_type, should_log_images=should_images, config=config)
         with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
             result = self.algorithm.eval_step(eval_model, prepared, state, config)
         return prepared, result
 
+    def _restore_grad_scaler(self, grad_scaler, resume_state) -> None:
+        # 只有 AMP scaler 启用且 checkpoint 中确实保存了状态才恢复
+        if grad_scaler is None or not grad_scaler.is_enabled():
+            return
+        if not isinstance(resume_state.latest_checkpoint, dict):
+            return
+        scaler_state = resume_state.latest_checkpoint.get("grad_scaler")
+        if scaler_state:
+            grad_scaler.load_state_dict(scaler_state)
+
     def _log_eval_metrics(self, *, metric_store, heavy_store, eval_type) -> None:
+        # 评估日志写平均值；heavy_store 会被打到 behavior 命名空间
         data_log = format_metric_logs(metric_store.average(), eval_type)
         data_log.update(format_metric_logs(heavy_store.average(), eval_type, kind="behavior"))
         if data_log:
             self.recorder.log_metrics(data_log, step=self.global_step, commit=False)
 
     def _log_eval_visualization(self, *, eval_model, prepared, result, state, config, eval_type, project_folder, epoch, num_batches) -> None:
+        # 评估可视化统一伪装成最后一个 batch，便于 visualizer 复用命名逻辑
         self.algorithm.visualize(
             model=eval_model,
             prepared=prepared,
@@ -446,6 +475,7 @@ class Trainer:
 
         # AMP 梯度缩放器（仅在 CUDA + AMP 时启用）
         grad_scaler = make_grad_scaler(self.context.device, bool(runtime.get("amp", False)), bool(runtime.get("use_grad_scaler", True)))
+        self._restore_grad_scaler(grad_scaler, resume_state)
         # runtime.epochs 表示目标总 epoch 数；resume 后继续跑到该总数，而不是额外追加 epochs 轮。
         end_epoch = int(runtime["epochs"])
 
@@ -530,6 +560,7 @@ class Trainer:
                     config=self.config,
                     eval_summaries=eval_summaries,
                     callback_manager=self.callbacks,
+                    grad_scaler=grad_scaler,
                 )
                 # 进程同步，避免不同步进入下一轮
                 distributed_barrier()

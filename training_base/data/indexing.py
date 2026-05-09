@@ -11,6 +11,7 @@ import tqdm
 
 
 def resolved_distance_bounds(min_dist_cat: int, max_dist_cat: int, waypoint_spacing: int) -> Tuple[int, int]:
+    # 距离类别按 waypoint_spacing 离散化，索引文件名使用实际可达的首尾桶
     distance_categories = list(range(min_dist_cat, max_dist_cat + 1, waypoint_spacing))
     if len(distance_categories) == 0:
         raise ValueError(
@@ -28,6 +29,7 @@ def get_dataset_index_path(
     context_size: int,
     end_slack: int,
 ) -> str:
+    # 参数变化会改变样本集合，因此全部写入文件名，避免误复用旧索引
     min_dist_cat, max_dist_cat = resolved_distance_bounds(
         min_dist_cat,
         max_dist_cat,
@@ -40,6 +42,7 @@ def get_dataset_index_path(
 
 
 def load_expected_lmdb_count(index_path: str) -> int:
+    # LMDB 缓存按 goals_index 存每个可作为目标的图像，因此期望数量等于 goals_index 长度
     with open(index_path, "rb") as f:
         _, goals_index = pickle.load(f)
     return len(goals_index)
@@ -63,13 +66,16 @@ def build_navigation_index(
         traj_data = get_trajectory(traj_name)
         traj_len = len(traj_data["position"])
 
+        # goals_index 覆盖所有时间步，用于正样本目标和跨轨迹负样本目标
         for goal_time in range(0, traj_len):
             goals_index.append((traj_name, goal_time))
 
+        # begin_time 保证历史上下文帧完整；end_time 保证未来动作标签长度完整
         begin_time = context_size * waypoint_spacing
         end_time = traj_len - end_slack - len_traj_pred * waypoint_spacing
 
         for curr_time in range(begin_time, end_time):
+            # 当前观测能采到的最远目标受配置上限和轨迹剩余长度共同约束
             max_goal_distance = min(max_dist_cat * waypoint_spacing, traj_len - curr_time - 1)
             samples_index.append((traj_name, curr_time, max_goal_distance))
 
@@ -83,6 +89,7 @@ def load_or_build_navigation_index(
 ) -> Tuple[list, list]:
     if os.path.exists(index_path):
         try:
+            # 索引文件是纯采样元数据，直接 pickle 读取即可
             with open(index_path, "rb") as f:
                 return pickle.load(f)
         except (OSError, EOFError, pickle.PickleError, ValueError, AttributeError) as exc:
@@ -91,6 +98,7 @@ def load_or_build_navigation_index(
                 f"{index_path}"
             ) from exc
 
+    # 不存在时由调用方提供的 build_fn 构建，并写回磁盘供后续复用
     index_to_data, goals_index = build_fn()
     with open(index_path, "wb") as f:
         pickle.dump((index_to_data, goals_index), f)

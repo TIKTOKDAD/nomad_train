@@ -11,6 +11,8 @@ from typing import Optional, Tuple
 import torch
 
 from training_base.models.base import BaseModel
+from training_base.models import ModelBuild
+from training_base.registry import model_registry, module_registry
 
 
 # ViNT 模型：编码器 + 预测头
@@ -37,3 +39,36 @@ class ViNT(BaseModel):
         # 编码器输出定长融合特征，head 再产生两个任务头输出
         features = self.encoder(obs_img, goal_img)
         return self.head(features)
+
+
+@model_registry.register("vint")
+def build_vint(config) -> ModelBuild:
+    data = config["data"]
+    model_config = config["model"]
+    # encoder_config 兼容 model 顶层参数和 model.encoder 子配置两种写法
+    encoder_config = dict(model_config)
+    if "encoder" in model_config:
+        encoder_config.update(model_config["encoder"])
+        encoder_name = encoder_config.get("name", "vint_encoder")
+    else:
+        encoder_name = "vint_encoder"
+    # ViNT encoder 输出 Transformer 融合特征；通用 waypoint_head 输出两个任务头
+    encoder = module_registry.build(encoder_name, encoder_config, data)
+    head = module_registry.build(
+        model_config.get("head", {}).get("name", "waypoint_head"),
+        {
+            "input_dim": encoder.output_dim,
+            "len_traj_pred": data["len_traj_pred"],
+            "num_action_params": 4 if data["learn_angle"] else 2,
+            "learn_angle": data["learn_angle"],
+        },
+    )
+    # 返回 ModelBuild，保持和 NoMaD builder 的统一协议
+    model = ViNT(
+        context_size=data["context_size"],
+        len_traj_pred=data["len_traj_pred"],
+        learn_angle=data["learn_angle"],
+        encoder=encoder,
+        head=head,
+    )
+    return ModelBuild(model=model, extras={})

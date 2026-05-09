@@ -29,6 +29,7 @@ from training_base.registry import data_module_registry
 
 
 def apply_train_subset(dataset: Dataset, *, subset_fraction: float, seed: int) -> tuple[Dataset, int, int]:
+    # train_subset 用于快速冒烟或小比例训练；返回子集大小和原始大小供日志记录
     original_size = len(dataset)
     if float(subset_fraction) < 1.0:
         indices = stable_subset_indices(original_size, subset_fraction, int(seed))
@@ -37,10 +38,12 @@ def apply_train_subset(dataset: Dataset, *, subset_fraction: float, seed: int) -
 
 
 def resolve_train_batch_size(runtime: dict, *, distributed: bool, world_size: int) -> tuple[int, int]:
+    # global_batch_size 优先；未配置时沿用旧字段 batch_size
     configured_global_batch_size = runtime.get("global_batch_size")
     global_batch_size = int(runtime["batch_size"] if configured_global_batch_size is None else configured_global_batch_size)
     per_device_batch_size = global_batch_size
     if distributed:
+        # DDP 下每个 rank 拿 global_batch_size/world_size，保持总 batch 语义不变
         if per_device_batch_size % world_size != 0:
             raise ValueError(
                 f"全局 batch_size={per_device_batch_size} 必须能被 world_size={world_size} 整除，以保持 DDP batch 语义。"
@@ -58,6 +61,7 @@ def resolve_data_runtime(
     train_subset_total_size: int,
     train_num_workers: int,
 ) -> dict:
+    # 将数据运行时的派生字段集中计算，再写回 runtime 供日志和 Trainer 使用
     global_batch_size, per_device_batch_size = resolve_train_batch_size(
         runtime,
         distributed=distributed,
@@ -330,17 +334,20 @@ class NavigationDataModule:
         runtime = self.config["runtime"]
         if not train_datasets:
             raise RuntimeError("未配置任何训练数据集，请检查 data.datasets 中的 train split。")
+        # 多数据集训练先 concat，再按稳定随机子集裁剪，保证比例应用在整体训练集上
         dataset, subset_size, total_size = apply_train_subset(
             ConcatDataset(train_datasets),
             subset_fraction=float(runtime.get("train_subset", 1.0)),
             seed=int(runtime.get("seed", 0)),
         )
+        # 包装成 epoch-aware dataset，使每个 __getitem__ 能感知当前 epoch/index
         dataset = EpochAwareDataset(dataset, seed=int(runtime.get("seed", 0)))
         self.train_dataset = dataset
         return dataset, subset_size, total_size
 
     def _build_train_loader(self, *, train_dataset: Dataset, train_batch_size: int, train_num_workers: int, pin_memory: bool, prefetch_factor: int):
         runtime = self.config["runtime"]
+        # sampler 负责 shuffle/DDP 分片，并把 epoch 一起传给 dataset
         self.train_sampler = build_epoch_sampler(
             train_dataset,
             distributed=self.context.distributed,
@@ -352,6 +359,7 @@ class NavigationDataModule:
         return DataLoader(
             train_dataset,
             batch_size=train_batch_size,
+            # shuffle 由 sampler 控制，不能同时传 shuffle=True
             shuffle=False,
             sampler=self.train_sampler,
             drop_last=False,
@@ -368,8 +376,10 @@ class NavigationDataModule:
             if self.context.distributed and distributed_eval:
                 # 分布式评估时手动按 rank 切片；之后 MetricStore.reduce_distributed 聚合指标
                 dataset = Subset(dataset, list(range(self.context.rank, len(dataset), self.context.world_size)))
+            # 评估使用独立 seed 区间，避免和训练采样上下文重叠
             eval_seed = int(runtime.get("seed", 0)) + 10_000
             dataset = EpochAwareDataset(dataset, seed=eval_seed)
+            # 评估不打乱顺序，但仍通过 EpochAwareSampler 传递 epoch
             test_sampler = EpochAwareSampler(dataset, shuffle=False, seed=eval_seed)
             self.test_dataloaders[dataset_type] = DataLoader(
                 dataset,
@@ -410,10 +420,12 @@ class NavigationDataModule:
         self._prepare_data_defaults()
         train_datasets, test_datasets = self._build_datasets(build_lmdb_only)
         if build_lmdb_only:
+            # build-lmdb-only 只需要触发 Dataset 初始化和缓存构建，不创建 DataLoader
             return
 
         train_dataset, train_subset_size, train_subset_total_size = self._build_train_dataset(train_datasets)
         train_num_workers = workers_per_rank(runtime, self.context.distributed, self.context.world_size, train=True)
+        # 计算有效 batch/workers 等字段并写回 runtime，确保 Trainer/日志看到的是实际值
         effective_runtime = resolve_data_runtime(
             runtime,
             distributed=self.context.distributed,

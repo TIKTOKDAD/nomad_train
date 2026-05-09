@@ -1,3 +1,9 @@
+# ============================================================
+# GNM algorithm registration - supervised waypoint variant
+# ============================================================
+# GNM 的训练逻辑完全复用 SupervisedWaypointAlgorithm；
+# 本文件只负责把算法名称 gnm 注册到 algorithm_registry。
+
 from training_base.algorithms.supervised_waypoint import SupervisedWaypointAlgorithm
 from training_base.registry import algorithm_registry
 

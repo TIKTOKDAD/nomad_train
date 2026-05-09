@@ -1,1 +1,1 @@
-"""Tests for training_base engineering behavior."""
+"""training_base 工程化行为测试包。"""

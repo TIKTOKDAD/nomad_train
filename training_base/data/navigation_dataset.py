@@ -247,7 +247,8 @@ class NavigationDataset(Dataset):
         # ========== 动作参数维度 ==========
         # learn_angle 决定动作维度是否包含角度信息
         if self.learn_angle:
-            self.num_action_params = 3  # (x, y, yaw) 或 (x, y, sin, cos)
+            # labeling 阶段先生成 (x, y, yaw)，__getitem__ 返回前再转成 (x, y, cos, sin)
+            self.num_action_params = 3
         else:
             self.num_action_params = 2  # (x, y)
         self.action_label_builder = NavigationActionLabelBuilder(
@@ -481,7 +482,7 @@ class NavigationDataset(Dataset):
                 包含context_size帧历史 + 1帧当前观测
             - goal_image (torch.Tensor): [3, H, W] 目标图像
             - actions_torch (torch.Tensor): [len_traj_pred, num_action_params] 动作标签
-                如果learn_angle=True: [len_traj_pred, 4] (x, y, sin(yaw), cos(yaw))
+                如果learn_angle=True: [len_traj_pred, 4] (x, y, cos(yaw), sin(yaw))
                 如果learn_angle=False: [len_traj_pred, 2] (x, y)
             - distance (torch.Tensor): [1] 从观测到目标的距离标签（航点数）
             - goal_pos (torch.Tensor): [2] 目标在局部坐标系中的位置
@@ -571,7 +572,7 @@ class NavigationDataset(Dataset):
         if self.learn_angle:
             # 将航向角转换为sin/cos表示（避免角度不连续性）
             # [len_traj_pred, 3] -> [len_traj_pred, 4]
-            # (x, y, yaw) -> (x, y, sin(yaw), cos(yaw))
+            # (x, y, yaw) -> (x, y, cos(yaw), sin(yaw))
             actions_torch = calculate_sin_cos(actions_torch)
 
         # ========== 计算动作掩码 ==========

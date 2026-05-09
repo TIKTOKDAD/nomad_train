@@ -1,6 +1,3 @@
-﻿import os
-import time
-
 # ============================================================
 # CLI entrypoint - config, runtime, data preflight, and training
 # ============================================================
@@ -10,6 +7,9 @@ import time
 # 3. 支持单进程 --build-lmdb-only 模式
 # 4. 注册内置组件并启动 Trainer.fit()
 # 训练入口脚本：负责配置加载、运行时初始化、数据检查与训练流程启动。
+
+import os
+import time
 
 import torch
 
@@ -79,7 +79,9 @@ def _prepare_project_folder(config, context) -> None:
     timestamp = time.strftime("%Y_%m_%d_%H_%M_%S") if context.is_main_process else ""
     timestamp = broadcast_string(timestamp)
     runtime["run_name"] += "_" + timestamp
-    runtime["project_folder"] = os.path.join("logs", runtime["project_name"], runtime["run_name"])
+    log_root = os.path.abspath(str(runtime.get("log_root", "logs")))
+    runtime["log_root"] = log_root
+    runtime["project_folder"] = os.path.join(log_root, runtime["project_name"], runtime["run_name"])
     if context.is_main_process:
         os.makedirs(runtime["project_folder"], exist_ok=True)
     barrier()

@@ -1,3 +1,11 @@
+# ============================================================
+# Engineering hardening tests - checkpoint/config/data/runtime safety
+# ============================================================
+# 本文件覆盖 training_base 的工程化保护逻辑：
+# 1. 检查 checkpoint 是否可恢复、是否保存随机数/GradScaler/回调状态
+# 2. 检查配置规范化、数据采样可复现和 DDP/子集派生字段
+# 3. 检查 Trainer 的 resume 语义、W&B 降级逻辑和分布式指标聚合
+
 import builtins
 import copy
 import random
@@ -40,6 +48,7 @@ from training_base.registry import (
 from training_base.trainer import Trainer
 
 
+# 测试用有状态回调：用于验证 callback_state 在 checkpoint 中的保存/恢复
 @callback_registry.register("unit_stateful")
 class _UnitStatefulCallback:
     def __init__(self, config, context):
@@ -55,6 +64,7 @@ class _UnitStatefulCallback:
         self.count = int(state.get("count", 0))
 
 
+# 采样上下文测试数据集：每次 __getitem__ 内部会调用 goal sampling
 class _ContextDataset(torch.utils.data.Dataset):
     def __len__(self):
         return 6
@@ -66,12 +76,15 @@ class _ContextDataset(torch.utils.data.Dataset):
         return sample_goal("traj", 10, 0, 2, goals_index)
 
 
+# 保留原始 batch 列表，便于比较多 worker DataLoader 的采样结果
 def _identity_collate(batch):
     return batch
 
 
+# checkpoint 相关硬化测试：完整保存、恢复、错误检查和旧权重 remap
 class CheckpointHardeningTest(unittest.TestCase):
     def test_save_checkpoint_is_loadable_and_keeps_latest_backup(self):
+        # latest.pth 应可读，并在覆盖前生成 latest.backup.pth
         model = torch.nn.Linear(2, 1)
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
@@ -93,6 +106,7 @@ class CheckpointHardeningTest(unittest.TestCase):
             self.assertEqual(payload["epoch"], 0)
             self.assertEqual(payload["global_step"], 3)
             self.assertIn("rng_state", payload)
+            self.assertIn("grad_scaler", payload)
 
             save_checkpoint(
                 latest_path,
@@ -107,7 +121,33 @@ class CheckpointHardeningTest(unittest.TestCase):
             )
             self.assertTrue(os.path.exists(os.path.join(tmpdir, "latest.backup.pth")))
 
+    def test_enabled_grad_scaler_state_is_checkpointed(self):
+        # AMP GradScaler 启用时必须进入 checkpoint，恢复后训练尺度才连续
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scaler = mock.Mock()
+        scaler.is_enabled.return_value = True
+        scaler.state_dict.return_value = {"scale": 128.0}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            latest_path = os.path.join(tmpdir, "latest.pth")
+            save_checkpoint(
+                latest_path,
+                epoch=0,
+                global_step=1,
+                model=model,
+                optimizer=optimizer,
+                scheduler=None,
+                algorithm_state={},
+                callback_state={},
+                config={"runtime": {"epochs": 1}},
+                grad_scaler=scaler,
+            )
+            payload = load_checkpoint(latest_path, torch.device("cpu"))
+            self.assertEqual(payload["grad_scaler"], {"scale": 128.0})
+
     def test_rng_state_restores_python_numpy_and_torch(self):
+        # 恢复 rng_state 后，Python/NumPy/Torch 的下一次随机数应与保存时一致
         model = torch.nn.Linear(2, 1)
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
@@ -154,6 +194,7 @@ class CheckpointHardeningTest(unittest.TestCase):
                 self.assertFalse(restore_rng_state(payload.get("rng_state"), path=path))
 
     def test_callback_state_is_saved_after_epoch_callbacks(self):
+        # checkpoint 回调应在其他 epoch_end 回调之后执行，确保保存的是更新后的状态
         model = torch.nn.Linear(2, 1)
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
         from training_base.callbacks import CallbackManager
@@ -199,6 +240,7 @@ class CheckpointHardeningTest(unittest.TestCase):
             self.assertEqual(second_manager.state_dict()["callbacks"][1]["state"]["count"], 1)
 
     def test_bad_training_checkpoint_fails_loudly(self):
+        # 看起来像训练 checkpoint 但缺必要字段时，应明确失败而不是静默当权重加载
         with tempfile.TemporaryDirectory() as tmpdir:
             bad_path = os.path.join(tmpdir, "latest.pth")
             atomic_torch_save({"epoch": 1}, bad_path)
@@ -206,6 +248,7 @@ class CheckpointHardeningTest(unittest.TestCase):
                 load_checkpoint(bad_path, torch.device("cpu"))
 
     def test_strict_resume_rejects_schema_model_key_mismatch(self):
+        # strict resume 遇到模型结构不匹配必须报错，防止误用错误 checkpoint
         source_model = torch.nn.Linear(2, 1)
         target_model = torch.nn.Linear(3, 1)
         target_optimizer = torch.optim.SGD(target_model.parameters(), lr=0.1)
@@ -240,6 +283,7 @@ class CheckpointHardeningTest(unittest.TestCase):
                 )
 
     def test_legacy_weight_remap_requires_explicit_flag(self):
+        # 旧版 key remap 只有显式开启时才允许，避免过度宽松的兼容掩盖错误
         class LegacyGnm(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -260,17 +304,20 @@ class CheckpointHardeningTest(unittest.TestCase):
         self.assertTrue(torch.equal(model.encoder.obs_mobilenet.weight, torch.ones(1, 1)))
 
 
+# 配置层硬化测试：非法字段拒绝、内置配置可解析、旧字段兼容
 class ConfigHardeningTest(unittest.TestCase):
     def _default_config(self):
         return load_yaml(os.path.join("training_base", "configs", "defaults.yaml"))
 
     def test_rejects_unsupported_context_type(self):
+        # 当前数据上下文只支持 temporal，非法值应在配置规范化阶段尽早失败
         config = self._default_config()
         config["data"]["context_type"] = "randomized"
         with self.assertRaises(ValueError):
             normalize_config(config)
 
     def test_rejects_invalid_eval_fraction_and_amp_dtype(self):
+        # eval fraction 和 AMP dtype 是运行时关键字段，非法值不应拖到训练中才报错
         config = self._default_config()
         config["logging"]["eval"]["schedule"]["fraction"] = 0
         with self.assertRaises(ValueError):
@@ -282,6 +329,7 @@ class ConfigHardeningTest(unittest.TestCase):
             normalize_config(config)
 
     def test_builtin_configs_normalize_and_core_registries_resolve(self):
+        # 仓库内置 YAML 都应该能规范化，并能在核心 registry 中找到对应组件
         register_builtins()
         defaults_path = os.path.join("training_base", "configs", "defaults.yaml")
         for filename in os.listdir(os.path.join("training_base", "configs")):
@@ -298,20 +346,45 @@ class ConfigHardeningTest(unittest.TestCase):
             self.assertIn(normalized["data"]["module_name"], data_module_registry.names())
 
     def test_legacy_negative_mining_alias_can_disable_goal_sampling(self):
+        # 旧字段 negative_mining=False 应迁移为新版 goal_sampling.negative.enabled=False
         config = self._default_config()
         config["data"].pop("goal_sampling", None)
         config["data"]["datasets"] = {"tiny": {"negative_mining": False}}
         normalized = normalize_config(config)
         self.assertFalse(normalized["data"]["goal_sampling"]["negative"]["enabled"])
 
+    def test_project_folder_uses_configured_log_root(self):
+        # run 输出目录必须使用 runtime.log_root，而不是默认落到当前工作目录
+        from training_base.cli import _prepare_project_folder
 
+        context = RuntimeContext(
+            device=torch.device("cpu"),
+            distributed=False,
+            rank=0,
+            local_rank=0,
+            world_size=1,
+            is_main_process=True,
+            gpu_ids=[0],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {"runtime": {"log_root": tmpdir, "project_name": "proj", "run_name": "run"}}
+            _prepare_project_folder(config, context)
+            project_folder = config["runtime"]["project_folder"]
+            self.assertTrue(os.path.isabs(project_folder))
+            self.assertTrue(project_folder.startswith(os.path.abspath(tmpdir)))
+            self.assertIn(os.path.join("proj", "run_"), project_folder)
+
+
+# 数据采样与 DataLoader 派生字段测试
 class DataSubsetTest(unittest.TestCase):
     def test_sampling_module_and_legacy_data_module_exports_match(self):
+        # data_module 旧导出路径应继续指向 sampling 模块中的新实现
         self.assertIs(data_module_exports.EpochAwareDataset, EpochAwareDataset)
         self.assertIs(data_module_exports.EpochAwareSampler, EpochAwareSampler)
         self.assertIs(data_module_exports.stable_subset_indices, stable_subset_indices)
 
     def test_stable_subset_indices_are_seeded(self):
+        # 同一 seed 下抽取的训练子集应完全一致
         first = stable_subset_indices(10, 0.3, seed=7)
         second = stable_subset_indices(10, 0.3, seed=7)
         self.assertEqual(first, second)
@@ -319,11 +392,13 @@ class DataSubsetTest(unittest.TestCase):
         self.assertEqual(len(set(first)), 3)
 
     def test_stable_subset_indices_change_with_seed(self):
+        # 不同 seed 应得到不同子集，证明 seed 确实进入采样路径
         first = stable_subset_indices(100, 0.25, seed=7)
         second = stable_subset_indices(100, 0.25, seed=8)
         self.assertNotEqual(first, second)
 
     def test_sample_goal_is_seed_epoch_index_deterministic(self):
+        # goal sampling 应由 seed/epoch/index 唯一决定，支持 persistent_workers 可复现
         goals_index = [("a", 1), ("b", 2), ("c", 3)]
         dataset = EpochAwareDataset(list(range(3)), seed=11)
         sampler = EpochAwareSampler(dataset, shuffle=False, seed=11)
@@ -343,6 +418,7 @@ class DataSubsetTest(unittest.TestCase):
         self.assertEqual(len(list(iter(sampler))), 3)
 
     def test_goal_sampling_new_config_preserves_legacy_default_and_can_disable_negative(self):
+        # 新配置默认应保持旧负样本行为，同时允许显式关闭负样本
         goals_index = [("other", 5)]
 
         class ZeroRng:
@@ -372,6 +448,7 @@ class DataSubsetTest(unittest.TestCase):
         self.assertEqual(disabled, ("traj", 12, False))
 
     def test_epoch_aware_dataloader_is_deterministic_with_persistent_workers(self):
+        # persistent_workers 下 worker 不重启，仍必须随 epoch 更新采样上下文
         def collect(seed, epoch):
             dataset = EpochAwareDataset(_ContextDataset(), seed=seed)
             sampler = EpochAwareSampler(dataset, shuffle=False, seed=seed)
@@ -397,6 +474,7 @@ class DataSubsetTest(unittest.TestCase):
         self.assertNotEqual(collect(seed=11, epoch=3), collect(seed=12, epoch=3))
 
     def test_resolve_data_runtime_centralizes_effective_fields(self):
+        # 数据 runtime 派生字段应由 resolve_data_runtime 一处集中计算
         runtime = {"batch_size": 8, "eval_batch_size": 3}
         effective = resolve_data_runtime(
             runtime,
@@ -421,6 +499,7 @@ class DataSubsetTest(unittest.TestCase):
         self.assertEqual(runtime, {"batch_size": 8, "eval_batch_size": 3})
 
 
+# 最小数据模块桩：用于验证 Trainer 在 resume 已完成时不会训练
 class _DummyDataModule:
     def __init__(self):
         self.setup_calls = 0
@@ -433,6 +512,7 @@ class _DummyDataModule:
         self.setup_calls += 1
 
 
+# 单 batch 训练数据模块桩：用于验证 resume 后继续跑剩余 epoch
 class _TinyTrainDataModule:
     def __init__(self):
         self.setup_calls = 0
@@ -449,6 +529,7 @@ class _TinyTrainDataModule:
         self.epochs.append(epoch)
 
 
+# resume 语义测试算法：恢复点到达目标 epoch 时 train_step 不应被调用
 class _ResumeOnlyAlgorithm(Algorithm):
     name = "dummy"
 
@@ -479,6 +560,7 @@ class _ResumeOnlyAlgorithm(Algorithm):
         return batch
 
 
+# 真正跑一小步训练的算法桩：用于验证 checkpoint resume 能延续训练状态
 class _CheckpointResumeAlgorithm(Algorithm):
     name = "checkpoint_resume"
 
@@ -521,8 +603,10 @@ class _CheckpointResumeAlgorithm(Algorithm):
         return StepResult(loss=loss, logs={"total_loss": loss}, batch_size=int(prepared.shape[0]))
 
 
+# Trainer resume 语义测试：目标总 epoch 与 checkpoint current_epoch 的关系
 class ResumeSemanticsTest(unittest.TestCase):
     def test_resume_exits_when_current_epoch_reaches_target_total_epochs(self):
+        # runtime.epochs 表示目标总轮数，不是 resume 后追加轮数
         config = load_yaml(os.path.join("training_base", "configs", "defaults.yaml"))
         config["runtime"]["epochs"] = 3
         config["runtime"]["gpu_ids"] = [0]
@@ -552,6 +636,7 @@ class ResumeSemanticsTest(unittest.TestCase):
         self.assertEqual(trainer.global_step, 5)
 
     def test_two_epoch_checkpoint_resume_continues_one_more_epoch(self):
+        # 从 2 epoch checkpoint 恢复到 runtime.epochs=3 时，只应继续训练第 3 轮
         config = load_yaml(os.path.join("training_base", "configs", "defaults.yaml"))
         config["runtime"]["epochs"] = 2
         config["runtime"]["gpu_ids"] = [0]
@@ -598,15 +683,19 @@ class ResumeSemanticsTest(unittest.TestCase):
             self.assertEqual(resumed_payload["callback_state"]["callbacks"][0]["state"]["count"], 3)
 
 
+# W&B sink 降级行为测试
 class WandBSinkTest(unittest.TestCase):
     def test_disabled_wandb_does_not_import(self):
+        # disabled sink 不应导入 wandb，方便无 wandb 环境运行测试
         context = mock.Mock(is_main_process=True)
         sink = WandBSink({"enabled": False}, context)
         self.assertIsNone(sink.run)
 
 
+# 指标聚合与 W&B 导入失败处理测试
 class MetricReduceTest(unittest.TestCase):
     def test_reduce_metric_logs_no_distributed_returns_clean_floats(self):
+        # 非分布式模式下应过滤 None/NaN，并把 Tensor 转成 Python float
         logs = {
             "loss": torch.tensor(2.0),
             "none": None,
@@ -615,6 +704,7 @@ class MetricReduceTest(unittest.TestCase):
         self.assertEqual(reduce_metric_logs_distributed(logs, torch.device("cpu")), {"loss": 2.0})
 
     def test_reduce_metric_logs_uses_all_reduce_payload(self):
+        # 分布式聚合使用 sum/count payload，保证各 rank 均值正确
         captured = []
 
         def fake_all_reduce(payload, op=None):
@@ -631,6 +721,7 @@ class MetricReduceTest(unittest.TestCase):
         self.assertEqual(reduced["loss"], 3.0)
 
     def test_reduce_metric_logs_keeps_collective_keys_for_nan_values(self):
+        # 即使某个 rank 的值是 NaN，也要参与同名 collective，避免不同 rank 调用次数不一致
         calls = []
 
         def fake_all_reduce(payload, op=None):
@@ -648,6 +739,7 @@ class MetricReduceTest(unittest.TestCase):
         self.assertEqual(reduced["nan"], 4.0)
 
     def test_non_strict_wandb_import_failure_does_not_raise(self):
+        # strict=False 时 wandb 导入失败应降级禁用，不影响训练继续
         real_import = builtins.__import__
 
         def fake_import(name, *args, **kwargs):

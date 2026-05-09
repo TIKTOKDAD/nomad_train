@@ -19,15 +19,18 @@ LMDB_CACHE_VERSION = 1
 
 
 def get_lmdb_cache_paths(data_split_folder: str, dataset_name: str) -> Tuple[str, str]:
+    # 每个 split/dataset 单独一个 LMDB，旁边放 complete.json 作为原子完成标记
     cache_path = os.path.join(data_split_folder, f"dataset_{dataset_name}.lmdb")
     complete_path = f"{cache_path}.complete.json"
     return cache_path, complete_path
 
 
+# 判断文件或目录是否存在，统一处理 LMDB 目录和完成标记文件
 def path_exists(path: str) -> bool:
     return os.path.isdir(path) or os.path.isfile(path)
 
 
+# 删除文件或目录；仅用于清理不完整缓存或临时缓存目录
 def remove_path(path: str) -> None:
     if os.path.isdir(path):
         shutil.rmtree(path)
@@ -42,6 +45,7 @@ def validate_lmdb_cache(
     expected_num_images: int,
 ) -> Tuple[bool, List[str]]:
     errors = []
+    # LMDB 主体和 complete.json 都必须存在，只有目录本身不足以证明构建完成
     if not path_exists(cache_path):
         errors.append(f"缺少 LMDB 缓存: {cache_path}")
     if not os.path.exists(complete_path):
@@ -55,6 +59,7 @@ def validate_lmdb_cache(
         errors.append(f"完成标记无效 {complete_path}: {exc}")
         return False, errors
 
+    # 完成标记记录版本、数据集名和图像数量，用于发现配置变化或半成品缓存
     if int(marker.get("version", -1)) != LMDB_CACHE_VERSION:
         errors.append(
             f"完成标记版本不匹配 {complete_path}: "
@@ -83,6 +88,7 @@ def check_lmdb_cache_ready(
     context_size: int,
     end_slack: int,
 ) -> Tuple[bool, List[str]]:
+    # 先根据数据配置推导索引文件路径，索引不存在时无法知道期望图像数量
     index_path = get_dataset_index_path(
         data_split_folder,
         min_dist_cat,
@@ -97,6 +103,7 @@ def check_lmdb_cache_ready(
         return False, [f"缺少数据集索引: {index_path}"]
 
     try:
+        # LMDB 缓存的是每一个 goal 图像，因此用 goals_index 长度校验完整性
         expected_num_images = load_expected_lmdb_count(index_path)
     except Exception as exc:
         return False, [f"加载数据集索引失败 {index_path}: {exc}"]
@@ -131,6 +138,7 @@ def build_or_open_lmdb_cache(
         expected_num_images,
     )
 
+    # build: 强制构建；auto: 缺失时构建；read: 只读已完成缓存
     should_build = lmdb_cache_mode == "build" or (
         lmdb_cache_mode == "auto" and not cache_ready
     )
@@ -156,10 +164,12 @@ def build_or_open_lmdb_cache(
                     "如需安全重建，请重新运行时加 --rebuild-incomplete-lmdb，"
                     "或设置 rebuild_incomplete_lmdb: True。"
                 )
+            # 用户显式允许后才清理旧缓存，避免误删仍有价值的训练数据
             remove_path(cache_filename)
             if os.path.exists(complete_filename):
                 os.remove(complete_filename)
 
+        # 先写临时 LMDB，全部成功后再 rename，避免中断后留下看似完整的目录
         tmp_cache_filename = f"{cache_filename}.tmp.{os.getpid()}"
         remove_path(tmp_cache_filename)
         tqdm_iterator = tqdm.tqdm(
@@ -172,6 +182,7 @@ def build_or_open_lmdb_cache(
         with lmdb.open(tmp_cache_filename, map_size=int(lmdb_map_size)) as image_cache:
             with image_cache.begin(write=True) as txn:
                 for traj_name, time in tqdm_iterator:
+                    # key 使用原始文件路径，便于读取阶段用同一个 get_data_path 复现
                     image_path = get_data_path(data_folder, traj_name, time)
                     with open(image_path, "rb") as f:
                         txn.put(image_path.encode(), f.read())
@@ -185,6 +196,7 @@ def build_or_open_lmdb_cache(
                 f"{num_cached_images} != {expected_num_images}"
             )
 
+        # rename 后再写 complete.json；complete.json 是读模式信任缓存的唯一完成信号
         os.rename(tmp_cache_filename, cache_filename)
         marker = {
             "version": LMDB_CACHE_VERSION,
@@ -200,6 +212,7 @@ def build_or_open_lmdb_cache(
 
     return lmdb.open(
         cache_filename,
+        # 训练阶段只读打开；锁/预读等参数由 DataLoader worker 场景调优
         readonly=True,
         lock=lmdb_lock,
         readahead=lmdb_readahead,
