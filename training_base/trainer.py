@@ -6,6 +6,7 @@
 # 2. 训练阶段负责前向、AMP、反向、优化器更新、日志、重指标、可视化、性能统计
 # 3. 评估阶段负责抽样评估、分布式聚合、最后一个 batch 可视化和调度器指标汇总
 import itertools
+import inspect
 import time
 
 import torch
@@ -15,6 +16,7 @@ from training_base.callbacks import CallbackManager
 from training_base.core.checkpoint import restore_rng_state
 from training_base.loggers import Recorder
 from training_base.loggers.key_format import format_metric_logs
+from training_base.loggers.metric_store import reduce_metric_logs_distributed
 from training_base.loggers.schedule import build_logging_schedules
 from training_base.core.native_utils import (
     autocast,
@@ -42,6 +44,7 @@ class Trainer:
         self.global_step = 0
         self.recorder = Recorder(config, context)
         self.callbacks = CallbackManager(config, context)
+        self._prepare_batch_accepts_config = "config" in inspect.signature(self.algorithm.prepare_batch).parameters
 
     # 将聚合后的指标打印到控制台（仅主进程）
     def _print_store(self, store, mode: str, epoch: int, batch_idx: int, num_batches: int) -> None:
@@ -69,7 +72,7 @@ class Trainer:
     ):
         runtime = config["runtime"]
         should_images = self.context.is_main_process and schedules.should_log(schedules.media_train, epoch, num_batches, batch_idx)
-        prepared = self.algorithm.prepare_batch(batch, transform, device, mode="train", should_log_images=should_images)
+        prepared = self._prepare_batch(batch, transform, device, mode="train", should_log_images=should_images, config=config)
 
         with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
             result = self.algorithm.train_step(model, prepared, state, config)
@@ -108,11 +111,26 @@ class Trainer:
             )
         return prepared, result, should_images
 
+    def _prepare_batch(self, batch, transform, device, *, mode: str, should_log_images: bool, config):
+        kwargs = {
+            "batch": batch,
+            "transform": transform,
+            "device": device,
+            "mode": mode,
+            "should_log_images": should_log_images,
+        }
+        if self._prepare_batch_accepts_config:
+            kwargs["config"] = config
+        return self.algorithm.prepare_batch(**kwargs)
+
     def _log_train_light_metrics(self, *, model, prepared, result, state, config, epoch, batch_idx, num_batches, schedules, metric_store, iterator, show_tqdm) -> None:
-        if not self.context.is_main_process or not schedules.should_log(schedules.train_metrics, epoch, num_batches, batch_idx):
+        if not schedules.should_log(schedules.train_metrics, epoch, num_batches, batch_idx):
             return
         metric_logs = dict(result.logs)
         metric_logs.update(self.algorithm.light_metrics(model, prepared, result, state, config, mode="train"))
+        metric_logs = reduce_metric_logs_distributed(metric_logs, self.context.device)
+        if not self.context.is_main_process:
+            return
         metric_store.update(metric_logs)
         if show_tqdm and result.loss is not None:
             iterator.set_postfix(loss=float(result.loss.detach().float().item()))
@@ -184,7 +202,7 @@ class Trainer:
 
     def _run_eval_step(self, *, eval_model, batch, transform, device, config, state, eval_type, should_images):
         runtime = config["runtime"]
-        prepared = self.algorithm.prepare_batch(batch, transform, device, mode=eval_type, should_log_images=should_images)
+        prepared = self._prepare_batch(batch, transform, device, mode=eval_type, should_log_images=should_images, config=config)
         with autocast(device, bool(runtime.get("amp", False)), runtime.get("amp_dtype", "fp16")):
             result = self.algorithm.eval_step(eval_model, prepared, state, config)
         return prepared, result

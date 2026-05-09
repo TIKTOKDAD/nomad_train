@@ -25,6 +25,7 @@ from training_base.data.sampling import (
     build_epoch_sampler,
     stable_subset_indices,
 )
+from training_base.registry import data_module_registry
 
 
 def apply_train_subset(dataset: Dataset, *, subset_fraction: float, seed: int) -> tuple[Dataset, int, int]:
@@ -179,15 +180,21 @@ def preflight_navigation_data(config) -> None:
 
 
 # 仅构建 LMDB 缓存的快捷入口
+def build_data_module(config, context):
+    module_name = str(config.get("data", {}).get("module_name", "navigation")).lower()
+    return data_module_registry.build(module_name, config, context)
+
+
 def handle_build_lmdb_only(config, context) -> bool:
     if not bool(config["runtime"].get("build_lmdb_only", False)):
         return False
-    datamodule = NavigationDataModule(config, context)
+    datamodule = build_data_module(config, context)
     datamodule.setup(build_lmdb_only=True)
     return True
 
 
 # 数据模块：构建数据集与 DataLoader，并处理 LMDB 缓存策略
+@data_module_registry.register("navigation")
 class NavigationDataModule:
     """Build navigation datasets and DataLoaders with DDP-safe LMDB semantics."""
 
@@ -238,6 +245,7 @@ class NavigationDataModule:
         # 旧配置可能缺少这两个字段，在进入 Dataset 前补齐
         data.setdefault("context_type", "temporal")
         data.setdefault("clip_goals", False)
+        data.setdefault("module_name", "navigation")
 
     # 构建训练与测试数据集，并记录元数据
     def _build_datasets(self, build_lmdb_only: bool):
@@ -295,9 +303,12 @@ class NavigationDataModule:
                     lmdb_readahead=bool(runtime.get("lmdb_readahead", False)),
                     lmdb_meminit=bool(runtime.get("lmdb_meminit", False)),
                     lmdb_max_readers=int(runtime.get("lmdb_max_readers", 512)),
+                    lmdb_map_size=int(runtime.get("lmdb_map_size", 2 ** 40)),
                     lmdb_cache_mode=lmdb_cache_mode,
                     rebuild_incomplete_lmdb=bool(runtime.get("rebuild_incomplete_lmdb", False)),
                     data_config_path=data.get("data_config_path"),
+                    image_aspect_ratio=float(data.get("image_aspect_ratio", 4 / 3)),
+                    goal_sampling=data.get("goal_sampling"),
                 )
                 metadata = navigation_dataset_metadata(dataset)
                 # 按 dataset_index 和 dataset_name 各存一份，方便 batch 级查找或人工读日志

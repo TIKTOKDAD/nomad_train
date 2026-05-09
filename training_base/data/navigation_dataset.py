@@ -9,38 +9,36 @@
 # 4. 使用LMDB缓存加速图像加载
 
 import os
-import yaml
 from typing import Tuple
-import io
 
 import torch
 from torch.utils.data import Dataset
 
-import pickle
-import sys
-import numpy.core as np_core
-
-sys.modules.setdefault("numpy._core", np_core)
-if hasattr(np_core, "multiarray"):
-    sys.modules.setdefault("numpy._core.multiarray", np_core.multiarray)
-# 说明：兼容旧版 pickle 中对 numpy 内部模块路径的引用
+import yaml
 
 # 导入数据处理工具函数
 from training_base.data.data_utils import (
-    img_path_to_data,  # 加载并预处理图像
     calculate_sin_cos,  # 将角度转换为sin/cos表示
-    get_data_path,  # 获取数据文件路径
 )
+from training_base.data.action_labels import NavigationActionLabelBuilder
+from training_base.data.goal_sampling import (
+    distance_label_for_goal,
+    normalize_goal_sampling_config,
+    sample_navigation_goal,
+)
+from training_base.data.image_store import LmdbImageStore
 from training_base.data.indexing import (
     build_navigation_index,
     get_dataset_index_path,
     load_or_build_navigation_index,
 )
-from training_base.data.labeling import compute_navigation_actions, context_entries, sample_goal
-from training_base.data.lmdb_cache import build_or_open_lmdb_cache, check_lmdb_cache_ready
+from training_base.data.labeling import context_entries
+from training_base.data.trajectory_store import PickleTrajectoryStore
+from training_base.registry import dataset_registry
 
 
 # 核心数据集类：负责采样、标签构造与图像缓存读取
+@dataset_registry.register("navigation")
 class NavigationDataset(Dataset):
     def __init__(
             self,
@@ -68,9 +66,12 @@ class NavigationDataset(Dataset):
             lmdb_readahead: bool = False,  # 随机访问图像时关闭预读，避免无效磁盘/页缓存压力
             lmdb_meminit: bool = False,  # 只读场景无需初始化内存页，可减少 LMDB 打开开销
             lmdb_max_readers: int = 512,  # 允许更多 DataLoader worker 同时读取 LMDB
+            lmdb_map_size: int = 2 ** 40,  # LMDB 构建时的 map_size
             lmdb_cache_mode: str = "auto",  # auto=缺失时构建；read=只读已完成缓存；build=只构建/补齐缓存
             rebuild_incomplete_lmdb: bool = False,  # True 时删除未完成/不匹配的 LMDB 后重建
             data_config_path: str = None,  # 数据集元信息配置；默认使用包内 data_config.yaml
+            image_aspect_ratio: float = 4 / 3,
+            goal_sampling: dict = None,
     ):
         """
         Navigation dataset class - used to train visual navigation models
@@ -206,10 +207,13 @@ class NavigationDataset(Dataset):
         self.lmdb_readahead = lmdb_readahead
         self.lmdb_meminit = lmdb_meminit
         self.lmdb_max_readers = lmdb_max_readers
+        self.lmdb_map_size = int(lmdb_map_size)
         self.lmdb_cache_mode = str(lmdb_cache_mode).lower()
         if self.lmdb_cache_mode not in {"auto", "read", "build"}:
             raise ValueError("lmdb_cache_mode 必须是 auto、read 或 build 之一")
         self.rebuild_incomplete_lmdb = rebuild_incomplete_lmdb
+        self.image_aspect_ratio = float(image_aspect_ratio)
+        self.goal_sampling_config = normalize_goal_sampling_config(goal_sampling)
 
         # ========== 加载数据集配置 ==========
         # data_config.yaml 记录每个数据集的统计信息
@@ -235,7 +239,8 @@ class NavigationDataset(Dataset):
 
         # ========== 初始化缓存 ==========
         # trajectory_cache 用于重复访问时避免磁盘 IO
-        self.trajectory_cache = {}  # 轨迹数据缓存（内存）
+        self.trajectory_store = PickleTrajectoryStore(self.data_folder)
+        self.trajectory_cache = self.trajectory_store.cache  # 兼容旧测试/调试入口
         self._load_index()  # 加载或构建数据索引
         self._build_caches()  # 根据 lmdb_cache_mode 构建或只读打开 LMDB 图像缓存
 
@@ -245,6 +250,15 @@ class NavigationDataset(Dataset):
             self.num_action_params = 3  # (x, y, yaw) 或 (x, y, sin, cos)
         else:
             self.num_action_params = 2  # (x, y)
+        self.action_label_builder = NavigationActionLabelBuilder(
+            len_traj_pred=self.len_traj_pred,
+            waypoint_spacing=self.waypoint_spacing,
+            learn_angle=self.learn_angle,
+            normalize=self.normalize,
+            metric_waypoint_spacing=float(self.data_config["metric_waypoint_spacing"]),
+            num_action_params=self.num_action_params,
+            dataset_name=self.dataset_name,
+        )
 
     def __getstate__(self):
         """
@@ -254,6 +268,7 @@ class NavigationDataset(Dataset):
         state = self.__dict__.copy()
         # LMDB 环境对象不可序列化，序列化前置空
         state["_image_cache"] = None
+        state["image_store"] = None
         return state
 
     def __setstate__(self, state):
@@ -277,19 +292,23 @@ class NavigationDataset(Dataset):
         参数:
             use_tqdm (bool): 是否显示进度条
         """
-        self._image_cache = build_or_open_lmdb_cache(
+        self.image_store = LmdbImageStore(
             data_folder=self.data_folder,
             data_split_folder=self.data_split_folder,
             dataset_name=self.dataset_name,
             goals_index=self.goals_index,
+            image_size=self.image_size,
+            image_aspect_ratio=self.image_aspect_ratio,
             lmdb_lock=self.lmdb_lock,
             lmdb_readahead=self.lmdb_readahead,
             lmdb_meminit=self.lmdb_meminit,
             lmdb_max_readers=self.lmdb_max_readers,
+            lmdb_map_size=self.lmdb_map_size,
             lmdb_cache_mode=self.lmdb_cache_mode,
             rebuild_incomplete_lmdb=self.rebuild_incomplete_lmdb,
             use_tqdm=use_tqdm,
         )
+        self._image_cache = self.image_store.env
 
     def _build_index(self, use_tqdm: bool = False):
         """
@@ -335,7 +354,14 @@ class NavigationDataset(Dataset):
             - goal_time: 目标时间步
             - goal_is_negative: 是否为负样本
         """
-        return sample_goal(trajectory_name, curr_time, max_goal_dist, self.waypoint_spacing, self.goals_index)
+        return sample_navigation_goal(
+            trajectory_name,
+            curr_time,
+            max_goal_dist,
+            self.waypoint_spacing,
+            self.goals_index,
+            config=self.goal_sampling_config,
+        )
 
     def _load_index(self) -> None:
         """
@@ -382,22 +408,7 @@ class NavigationDataset(Dataset):
         返回:
             预处理后的图像张量
         """
-        # 根据轨迹名与时间步生成图像路径
-        image_path = get_data_path(self.data_folder, trajectory_name, time)
-
-        try:
-            # LMDB 读取：key 为图像路径字符串
-            with self._image_cache.begin() as txn:
-                image_buffer = txn.get(image_path.encode())
-            if image_buffer is None:
-                raise KeyError(image_path)
-            # 将二进制缓冲转为 BytesIO 供 PIL/torch 读取
-            image_bytes = io.BytesIO(bytes(image_buffer))
-            return img_path_to_data(image_bytes, self.image_size)
-        except Exception as exc:
-            raise RuntimeError(
-                f"无法从数据集 '{self.dataset_name}' 的 LMDB 缓存读取图像: {image_path}"
-            ) from exc
+        return self.image_store.load(trajectory_name, time)
 
     def _compute_actions(self, traj_data, curr_time, goal_time, trajectory_name):
         """
@@ -419,17 +430,10 @@ class NavigationDataset(Dataset):
             actions: 动作序列 [len_traj_pred, num_action_params]
             goal_pos: 目标在局部坐标系中的位置 [2]
         """
-        return compute_navigation_actions(
+        return self.action_label_builder.build(
             traj_data=traj_data,
             curr_time=curr_time,
             goal_time=goal_time,
-            len_traj_pred=self.len_traj_pred,
-            waypoint_spacing=self.waypoint_spacing,
-            learn_angle=self.learn_angle,
-            normalize=self.normalize,
-            metric_waypoint_spacing=float(self.data_config["metric_waypoint_spacing"]),
-            num_action_params=self.num_action_params,
-            dataset_name=self.dataset_name,
             trajectory_name=trajectory_name,
         )
 
@@ -449,16 +453,7 @@ class NavigationDataset(Dataset):
         返回:
             traj_data: 轨迹数据字典
         """
-        # 命中缓存则直接返回
-        if trajectory_name in self.trajectory_cache:
-            return self.trajectory_cache[trajectory_name]
-        else:
-            # 从磁盘加载轨迹数据
-            with open(os.path.join(self.data_folder, trajectory_name, "traj_data.pkl"), "rb") as f:
-                traj_data = pickle.load(f)
-            # 缓存到内存
-            self.trajectory_cache[trajectory_name] = traj_data
-            return traj_data
+        return self.trajectory_store.get(trajectory_name)
 
     def __len__(self) -> int:
         """返回数据集大小"""
@@ -549,17 +544,26 @@ class NavigationDataset(Dataset):
 
         # ========== 计算距离标签 ==========
         if goal_is_negative:
-            # 负样本：在当前实现中将距离标签置为max_dist_cat
-            # （等效为最远可达桶，而不是-1）
-            distance = self.max_dist_cat
+            distance = distance_label_for_goal(
+                True,
+                distance=self.max_dist_cat,
+                max_dist_cat=self.max_dist_cat,
+                config=self.goal_sampling_config,
+            )
         else:
             # 正样本：计算实际距离（航点数）
-            distance = (goal_time - curr_time) // self.waypoint_spacing
+            positive_distance = (goal_time - curr_time) // self.waypoint_spacing
             if (goal_time - curr_time) % self.waypoint_spacing != 0:
                 raise ValueError(
                     f"{self.dataset_name}:{f_curr}->{f_goal} 的 goal_time={goal_time} 与 "
                     f"curr_time={curr_time} 间隔必须是 waypoint_spacing={self.waypoint_spacing} 的整数倍"
                 )
+            distance = distance_label_for_goal(
+                False,
+                distance=positive_distance,
+                max_dist_cat=self.max_dist_cat,
+                config=self.goal_sampling_config,
+            )
 
         # ========== 处理动作标签 ==========
         # numpy -> torch，并按需转换角度表示

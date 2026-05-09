@@ -11,9 +11,7 @@ import torchvision.transforms.functional as TF
 from training_base.algorithms.base import Algorithm, StepResult
 from training_base.core.checkpoint import (
     ResumeState,
-    find_latest_checkpoint,
-    load_checkpoint,
-    load_model_state,
+    load_training_resume,
     remap_legacy_state_dict,
     report_state_key_differences,
     strip_module_prefix,
@@ -46,23 +44,28 @@ class NoMaDAlgorithm(Algorithm):
         return objective_registry.build(objective_config["name"], objective_config)
 
     def prepare_resume(self, model, optimizer, scheduler, config, device) -> ResumeState:
-        load_run = config["runtime"].get("load_run")
-        if not load_run:
-            return ResumeState(extra={"ema_state_dict": None})
+        resume_state = load_training_resume(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            config=config,
+            device=device,
+            model_name=config["model"]["name"],
+        )
+        if resume_state.latest_checkpoint is None:
+            resume_state.extra = {"ema_state_dict": None, **(resume_state.extra or {})}
+            return resume_state
 
-        load_project_folder = os.path.join("logs", load_run)
-        checkpoint_path = find_latest_checkpoint(load_project_folder)
-        print("正在从以下目录加载模型:", load_project_folder)
-        latest_checkpoint = load_checkpoint(checkpoint_path, device)
-        load_model_state(model, latest_checkpoint, strict=False, model_name=config["model"]["name"])
-
-        current_epoch = latest_checkpoint.get("epoch", -1) + 1 if isinstance(latest_checkpoint, dict) else 0
+        latest_checkpoint = resume_state.latest_checkpoint
+        load_project_folder = resume_state.load_project_folder
+        current_epoch = resume_state.current_epoch
         if current_epoch == 0:
             epoch_ids = []
-            for filename in os.listdir(load_project_folder):
-                stem, ext = os.path.splitext(filename)
-                if ext == ".pth" and stem.isdigit():
-                    epoch_ids.append(int(stem))
+            if load_project_folder and os.path.isdir(load_project_folder):
+                for filename in os.listdir(load_project_folder):
+                    stem, ext = os.path.splitext(filename)
+                    if ext == ".pth" and stem.isdigit():
+                        epoch_ids.append(int(stem))
             if epoch_ids:
                 current_epoch = max(epoch_ids) + 1
 
@@ -70,17 +73,17 @@ class NoMaDAlgorithm(Algorithm):
         resume_ema_state = algorithm_state.get("ema_model", None)
         if resume_ema_state is None and isinstance(latest_checkpoint, dict):
             resume_ema_state = latest_checkpoint.get("ema_model", None)
-        ema_latest_path = os.path.join(load_project_folder, "ema_latest.pth")
-        if resume_ema_state is None and os.path.exists(ema_latest_path):
+        ema_latest_path = os.path.join(load_project_folder, "ema_latest.pth") if load_project_folder else None
+        if resume_ema_state is None and ema_latest_path and os.path.exists(ema_latest_path):
             resume_ema_state = torch.load(ema_latest_path, map_location=device)
 
         optimizer_state = latest_checkpoint.get("optimizer", None) if isinstance(latest_checkpoint, dict) else None
         scheduler_state = latest_checkpoint.get("scheduler", None) if isinstance(latest_checkpoint, dict) else None
-        if optimizer_state is None:
+        if optimizer_state is None and load_project_folder:
             optimizer_latest_path = os.path.join(load_project_folder, "optimizer_latest.pth")
             if os.path.exists(optimizer_latest_path):
                 optimizer_state = torch.load(optimizer_latest_path, map_location=device)
-        if scheduler_state is None:
+        if scheduler_state is None and load_project_folder:
             scheduler_latest_path = os.path.join(load_project_folder, "scheduler_latest.pth")
             if os.path.exists(scheduler_latest_path):
                 scheduler_state = torch.load(scheduler_latest_path, map_location=device)
@@ -89,13 +92,13 @@ class NoMaDAlgorithm(Algorithm):
         if scheduler is not None and scheduler_state is not None:
             scheduler.load_state_dict(scheduler_state if isinstance(scheduler_state, dict) else scheduler_state.state_dict())
 
-        print(f"从第 {current_epoch} 轮继续训练")
-        global_step = latest_checkpoint.get("global_step", 0) if isinstance(latest_checkpoint, dict) else 0
+        extra = dict(resume_state.extra or {})
+        extra["ema_state_dict"] = resume_ema_state
         return ResumeState(
             current_epoch=current_epoch,
             latest_checkpoint=latest_checkpoint,
             load_project_folder=load_project_folder,
-            extra={"ema_state_dict": resume_ema_state, "global_step": global_step},
+            extra=extra,
         )
 
     def create_state(self, model, model_extras, objective, config, device, resume_state: ResumeState):
@@ -107,15 +110,18 @@ class NoMaDAlgorithm(Algorithm):
             ema_model = EMAModel(model=unwrap_model(model), power=float(ema_config.get("power", 0.75)))
             resume_ema = (resume_state.extra or {}).get("ema_state_dict")
             if resume_ema is not None:
-                ema_state = remap_legacy_state_dict("nomad", strip_module_prefix(resume_ema))
+                ema_state = strip_module_prefix(resume_ema)
+                if bool(config.get("runtime", {}).get("allow_legacy_weight_remap", False)):
+                    ema_state = remap_legacy_state_dict("nomad", ema_state)
                 incompatible = ema_model.averaged_model.load_state_dict(ema_state, strict=False)
                 report_state_key_differences(incompatible, label="NoMaD EMA 状态")
         return NoMaDState(noise_scheduler=model_extras["noise_scheduler"], ema_model=ema_model, objective=objective)
 
-    def prepare_batch(self, batch, transform, device, mode: str, should_log_images: bool):
+    def prepare_batch(self, batch, transform, device, mode: str, should_log_images: bool, config=None):
         obs_images = torch.split(batch.obs_image, 3, dim=1)
-        viz_obs = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1]) if should_log_images else None
-        viz_goal = TF.resize(batch.goal_image, VISUALIZATION_IMAGE_SIZE[::-1]) if should_log_images else None
+        viz_size = tuple((config or {}).get("visualization", {}).get("image_size", VISUALIZATION_IMAGE_SIZE))
+        viz_obs = TF.resize(obs_images[-1], viz_size[::-1]) if should_log_images else None
+        viz_goal = TF.resize(batch.goal_image, viz_size[::-1]) if should_log_images else None
         return {
             "obs": split_and_transform_obs(batch.obs_image, transform, device),
             "goal": transform_goal(batch.goal_image, transform, device),

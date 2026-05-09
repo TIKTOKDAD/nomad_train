@@ -34,6 +34,9 @@ data/
   Navigation dataset protocol, LMDB cache handling, and DDP-safe DataLoaders.
   Deterministic epoch/index-aware sampling lives in `data/sampling.py`; label
   sampling uses `data/labeling.py`.
+  Trajectory loading, LMDB image reads, goal sampling, and action label
+  construction are separated internally so new datasets can plug in through the
+  data-module registry.
   Offline dataset-statistics tools do not live here.
 
 models/
@@ -85,10 +88,14 @@ Run DDP training after LMDB caches are complete:
 torchrun --standalone --nproc_per_node=4 -m training_base.cli -c training_base/configs/nomad_retrain.yaml
 ```
 
-Resume by setting `runtime.load_run` in the config. `runtime.epochs` is the
-target total epoch count, so a checkpoint saved at epoch 20 with
-`runtime.epochs: 100` resumes through epoch 99 rather than adding 100 more
-epochs.
+Resume by setting `runtime.load_run` or `runtime.load_checkpoint_path`.
+`runtime.load_run` resolves to `<runtime.log_root>/<load_run>/latest.pth`;
+`runtime.load_checkpoint_path` points directly at a checkpoint file. New schema
+checkpoints load strictly by default through `runtime.resume_strict: true`.
+Legacy GNM/ViNT/NoMaD key remapping is opt-in with
+`runtime.allow_legacy_weight_remap: true`. `runtime.epochs` is the target total
+epoch count, so a checkpoint saved at epoch 20 with `runtime.epochs: 100`
+resumes through epoch 99 rather than adding 100 more epochs.
 
 Set a W&B sink to `enabled: false` to disable W&B. Set `strict: true` only when
 logging failures should stop training; by default W&B failures warn and training
@@ -110,6 +117,8 @@ metric_registry
 visualizer_registry
 callback_registry
 log_sink_registry
+dataset_registry
+data_module_registry
 module_registry
 loss_registry
 optimizer_registry
@@ -122,6 +131,10 @@ Call `register_builtins()` before building configured objects.
 Registered reusable training items include GNM/ViNT encoders, waypoint heads,
 NoMaD vision modules, diffusion networks, distance heads, and DDPM noise
 schedulers.
+
+The default data module is `data.module_name: navigation`. Register a new data
+module under `data_module_registry` when a dataset cannot reasonably adapt to
+the navigation batch contract.
 
 ## Adding A New Paper
 
@@ -158,9 +171,15 @@ epoch-aware data sampling derives stochastic labels from `seed + epoch + index`
 so resumed epochs do not depend on worker-local random streams.
 
 Old GNM, ViNT, and NoMaD checkpoints are read-only compatible where the legacy
-module names are known. Loading reports missing and unexpected model keys after
-the remap attempt, so incompatible weights are visible instead of being silently
-ignored. The old layout is not used for new saves.
+module names are known, but remapping is explicit: set
+`runtime.allow_legacy_weight_remap: true`. Loading reports missing and
+unexpected model keys after the remap attempt, so incompatible weights are
+visible instead of being silently ignored. The old layout is not used for new
+saves.
+
+Training light metrics are all-reduced before rank0 writes logs in DDP, so W&B
+and console values represent the global step rather than only rank0's local
+batch. Heavy metrics and media still follow their configured schedules.
 
 ## Visualization
 

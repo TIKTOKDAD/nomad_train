@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 import random
 import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -159,8 +159,17 @@ def report_state_key_differences(incompatible, label: str = "检查点模型状�
         )
 
 
-def load_model_state(model, checkpoint: dict, *, strict: bool = False, model_name: Optional[str] = None):
-    state_dict = remap_legacy_state_dict(model_name, extract_model_state(checkpoint))
+def load_model_state(
+    model,
+    checkpoint: dict,
+    *,
+    strict: bool = False,
+    model_name: Optional[str] = None,
+    allow_legacy_remap: bool = False,
+):
+    state_dict = extract_model_state(checkpoint)
+    if allow_legacy_remap:
+        state_dict = remap_legacy_state_dict(model_name, state_dict)
     incompatible = model.load_state_dict(state_dict, strict=strict)
     report_state_key_differences(incompatible)
     return incompatible
@@ -168,6 +177,24 @@ def load_model_state(model, checkpoint: dict, *, strict: bool = False, model_nam
 
 def find_latest_checkpoint(project_folder: str) -> str:
     return os.path.join(project_folder, "latest.pth")
+
+
+def resolve_resume_checkpoint_path(config: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    runtime = config.get("runtime", {})
+    load_checkpoint_path = runtime.get("load_checkpoint_path")
+    load_run = runtime.get("load_run")
+    if load_checkpoint_path and load_run:
+        raise ValueError("runtime.load_checkpoint_path 和 runtime.load_run 只能配置一个")
+    if load_checkpoint_path:
+        checkpoint_path = str(load_checkpoint_path)
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.abspath(checkpoint_path)
+        return checkpoint_path, os.path.dirname(checkpoint_path)
+    if load_run:
+        log_root = str(runtime.get("log_root", "logs"))
+        load_project_folder = os.path.join(log_root, str(load_run))
+        return find_latest_checkpoint(load_project_folder), load_project_folder
+    return None, None
 
 
 def _looks_like_legacy_model_state(payload) -> bool:
@@ -214,6 +241,62 @@ def load_checkpoint(path: str, device):
             f"检查点 {path} 既不像有效的 training_base 训练状态，也不像旧版模型 state_dict。"
         )
     return payload
+
+
+def _resume_flags(config: Dict[str, Any], checkpoint: dict) -> Tuple[bool, bool]:
+    runtime = config.get("runtime", {})
+    default_strict = True if _looks_like_training_checkpoint(checkpoint) else False
+    strict = bool(runtime.get("resume_strict", default_strict))
+    allow_legacy_remap = bool(runtime.get("allow_legacy_weight_remap", False))
+    return strict, allow_legacy_remap
+
+
+def load_training_resume(
+    *,
+    model,
+    optimizer,
+    scheduler,
+    config: Dict[str, Any],
+    device,
+    model_name: Optional[str] = None,
+) -> ResumeState:
+    checkpoint_path, load_project_folder = resolve_resume_checkpoint_path(config)
+    if not checkpoint_path:
+        return ResumeState(extra={"global_step": 0})
+
+    print("姝ｅ湪浠庢鏌ョ偣鎭㈠璁粌:", checkpoint_path)
+    latest_checkpoint = load_checkpoint(checkpoint_path, device)
+    strict, allow_legacy_remap = _resume_flags(config, latest_checkpoint)
+    load_model_state(
+        model,
+        latest_checkpoint,
+        strict=strict,
+        model_name=model_name,
+        allow_legacy_remap=allow_legacy_remap,
+    )
+
+    is_training_checkpoint = _looks_like_training_checkpoint(latest_checkpoint)
+    current_epoch = latest_checkpoint.get("epoch", -1) + 1 if is_training_checkpoint else 0
+    optimizer_state = latest_checkpoint.get("optimizer", None) if is_training_checkpoint else None
+    scheduler_state = latest_checkpoint.get("scheduler", None) if is_training_checkpoint else None
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
+    if scheduler is not None and scheduler_state is not None:
+        scheduler.load_state_dict(scheduler_state)
+
+    global_step = latest_checkpoint.get("global_step", 0) if is_training_checkpoint else 0
+    print(f"浠庣 {current_epoch} 杞户缁缁?")
+    return ResumeState(
+        current_epoch=current_epoch,
+        latest_checkpoint=latest_checkpoint,
+        load_project_folder=load_project_folder,
+        extra={
+            "global_step": global_step,
+            "checkpoint_path": checkpoint_path,
+            "resume_strict": strict,
+            "allow_legacy_weight_remap": allow_legacy_remap,
+        },
+    )
 
 
 def _checkpoint_backup_path(path: str) -> str:

@@ -332,7 +332,11 @@ def resize_and_aspect_crop(
     return resize_img
 
 
-def img_path_to_data(path: Union[str, io.BytesIO], image_resize_size: Tuple[int, int]) -> torch.Tensor:
+def img_path_to_data(
+    path: Union[str, io.BytesIO],
+    image_resize_size: Tuple[int, int],
+    aspect_ratio: float = IMAGE_ASPECT_RATIO,
+) -> torch.Tensor:
     """
     从路径加载图像并转换为张量
     
@@ -358,5 +362,5 @@ def img_path_to_data(path: Union[str, io.BytesIO], image_resize_size: Tuple[int,
         - 支持文件路径和字节流（用于LMDB）
         - 不进行归一化，保持原始像素值范围[0, 1]
     """
-    return resize_and_aspect_crop(Image.open(path), image_resize_size)    
+    return resize_and_aspect_crop(Image.open(path), image_resize_size, aspect_ratio=aspect_ratio)
 

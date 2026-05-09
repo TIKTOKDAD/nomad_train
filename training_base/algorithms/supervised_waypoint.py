@@ -2,7 +2,6 @@
 # Supervised waypoint algorithm - shared GNM/ViNT trainer logic
 # ============================================================
 
-import os
 from typing import Dict
 
 import torch
@@ -11,9 +10,7 @@ import torchvision.transforms.functional as TF
 from training_base.algorithms.base import Algorithm, StepResult
 from training_base.core.checkpoint import (
     ResumeState,
-    find_latest_checkpoint,
-    load_checkpoint,
-    load_model_state,
+    load_training_resume,
 )
 from training_base.data.batch import split_and_transform_obs, transform_goal
 from training_base.data.data_utils import VISUALIZATION_IMAGE_SIZE
@@ -32,36 +29,20 @@ class SupervisedWaypointAlgorithm(Algorithm):
         return objective_registry.build(config["objective"]["name"], config["objective"])
 
     def prepare_resume(self, model, optimizer, scheduler, config, device) -> ResumeState:
-        load_run = config["runtime"].get("load_run")
-        if not load_run:
-            return ResumeState(extra={})
-
-        load_project_folder = os.path.join("logs", load_run)
-        checkpoint_path = find_latest_checkpoint(load_project_folder)
-        print("正在从以下目录加载模型:", load_project_folder)
-        latest_checkpoint = load_checkpoint(checkpoint_path, device)
-        load_model_state(model, latest_checkpoint, strict=False, model_name=config["model"]["name"])
-
-        current_epoch = latest_checkpoint.get("epoch", -1) + 1 if isinstance(latest_checkpoint, dict) else 0
-        optimizer_state = latest_checkpoint.get("optimizer", None) if isinstance(latest_checkpoint, dict) else None
-        scheduler_state = latest_checkpoint.get("scheduler", None) if isinstance(latest_checkpoint, dict) else None
-        if optimizer_state is not None:
-            optimizer.load_state_dict(optimizer_state)
-        if scheduler is not None and scheduler_state is not None:
-            scheduler.load_state_dict(scheduler_state)
-        print(f"从第 {current_epoch} 轮继续训练")
-        global_step = latest_checkpoint.get("global_step", 0) if isinstance(latest_checkpoint, dict) else 0
-        return ResumeState(
-            current_epoch=current_epoch,
-            latest_checkpoint=latest_checkpoint,
-            load_project_folder=load_project_folder,
-            extra={"global_step": global_step},
+        return load_training_resume(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            config=config,
+            device=device,
+            model_name=config["model"]["name"],
         )
 
-    def prepare_batch(self, batch, transform, device, mode: str, should_log_images: bool):
+    def prepare_batch(self, batch, transform, device, mode: str, should_log_images: bool, config=None):
         obs_images = torch.split(batch.obs_image, 3, dim=1)
-        viz_obs_image = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE) if should_log_images else None
-        viz_goal_image = TF.resize(batch.goal_image, VISUALIZATION_IMAGE_SIZE) if should_log_images else None
+        viz_size = tuple((config or {}).get("visualization", {}).get("image_size", VISUALIZATION_IMAGE_SIZE))
+        viz_obs_image = TF.resize(obs_images[-1], viz_size) if should_log_images else None
+        viz_goal_image = TF.resize(batch.goal_image, viz_size) if should_log_images else None
         return {
             "obs_image": split_and_transform_obs(batch.obs_image, transform, device),
             "goal_image": transform_goal(batch.goal_image, transform, device),

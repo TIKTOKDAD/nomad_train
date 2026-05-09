@@ -30,7 +30,7 @@ from training_base.core.runtime import (
     setup_runtime,
     setup_seed,
 )
-from training_base.data.data_module import NavigationDataModule, handle_build_lmdb_only, preflight_navigation_data
+from training_base.data.data_module import build_data_module, handle_build_lmdb_only, preflight_navigation_data
 from training_base.registry import algorithm_registry, register_builtins
 from training_base.trainer import Trainer
 
@@ -139,6 +139,8 @@ def main(argv=None) -> None:
         print(config)
 
     try:
+        # 触发内置组件注册；build_lmdb_only 也可能需要通过 data_module_registry 构建数据模块
+        register_builtins()
         # 仅构建 LMDB：成功后直接退出
         if bool(config["runtime"].get("build_lmdb_only", False)):
             if not handle_build_lmdb_only(config, context):
@@ -147,12 +149,11 @@ def main(argv=None) -> None:
                 print("LMDB 缓存构建完成")
             return
 
-        # 常规训练流程：注册内置组件 -> 构建算法与数据模块 -> 启动训练
-        register_builtins()
+        # 常规训练流程：构建算法与数据模块 -> 启动训练
         # algorithm_registry 返回算法类；这里实例化后交给 Trainer 使用
         algorithm_cls = algorithm_registry.get(config["algorithm"]["name"])
         algorithm = algorithm_cls()
-        datamodule = NavigationDataModule(config, context)
+        datamodule = build_data_module(config, context)
         Trainer(config=config, algorithm=algorithm, datamodule=datamodule, context=context).fit()
         if context.is_main_process:
             print("训练完成")

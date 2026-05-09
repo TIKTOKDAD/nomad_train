@@ -12,15 +12,31 @@ from torch.utils.data import DataLoader
 
 from training_base.algorithms.base import Algorithm, StepResult
 from training_base.core.checkpoint import ResumeState
-from training_base.core.checkpoint import atomic_torch_save, load_checkpoint, load_model_state, restore_rng_state, save_checkpoint
+from training_base.core.checkpoint import (
+    atomic_torch_save,
+    load_checkpoint,
+    load_model_state,
+    load_training_resume,
+    restore_rng_state,
+    save_checkpoint,
+)
 from training_base.core.runtime import RuntimeContext
 from training_base.core.config import load_yaml, normalize_config
 from training_base.data import data_module as data_module_exports
 from training_base.data.data_module import resolve_data_runtime
+from training_base.data.goal_sampling import normalize_goal_sampling_config, sample_navigation_goal
 from training_base.data.labeling import sample_goal
 from training_base.data.sampling import EpochAwareDataset, EpochAwareSampler, stable_subset_indices
+from training_base.loggers.metric_store import reduce_metric_logs_distributed
 from training_base.loggers.wandb import WandBSink
-from training_base.registry import callback_registry
+from training_base.registry import (
+    algorithm_registry,
+    callback_registry,
+    data_module_registry,
+    model_registry,
+    objective_registry,
+    register_builtins,
+)
 from training_base.trainer import Trainer
 
 
@@ -189,6 +205,60 @@ class CheckpointHardeningTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 load_checkpoint(bad_path, torch.device("cpu"))
 
+    def test_strict_resume_rejects_schema_model_key_mismatch(self):
+        source_model = torch.nn.Linear(2, 1)
+        target_model = torch.nn.Linear(3, 1)
+        target_optimizer = torch.optim.SGD(target_model.parameters(), lr=0.1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = os.path.join(tmpdir, "latest.pth")
+            save_checkpoint(
+                checkpoint_path,
+                epoch=0,
+                global_step=1,
+                model=source_model,
+                optimizer=torch.optim.SGD(source_model.parameters(), lr=0.1),
+                scheduler=None,
+                algorithm_state={},
+                callback_state={},
+                config={},
+            )
+            config = {
+                "runtime": {
+                    "load_checkpoint_path": checkpoint_path,
+                    "resume_strict": True,
+                    "allow_legacy_weight_remap": False,
+                }
+            }
+            with self.assertRaises(RuntimeError):
+                load_training_resume(
+                    model=target_model,
+                    optimizer=target_optimizer,
+                    scheduler=None,
+                    config=config,
+                    device=torch.device("cpu"),
+                    model_name="gnm",
+                )
+
+    def test_legacy_weight_remap_requires_explicit_flag(self):
+        class LegacyGnm(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.encoder = torch.nn.Module()
+                self.encoder.obs_mobilenet = torch.nn.Linear(1, 1, bias=False)
+
+        checkpoint = {"obs_mobilenet.weight": torch.ones(1, 1)}
+        model = LegacyGnm()
+        with self.assertRaises(RuntimeError):
+            load_model_state(model, checkpoint, strict=True, model_name="gnm")
+        load_model_state(
+            model,
+            checkpoint,
+            strict=True,
+            model_name="gnm",
+            allow_legacy_remap=True,
+        )
+        self.assertTrue(torch.equal(model.encoder.obs_mobilenet.weight, torch.ones(1, 1)))
+
 
 class ConfigHardeningTest(unittest.TestCase):
     def _default_config(self):
@@ -210,6 +280,29 @@ class ConfigHardeningTest(unittest.TestCase):
         config["runtime"]["amp_dtype"] = "fp32"
         with self.assertRaises(ValueError):
             normalize_config(config)
+
+    def test_builtin_configs_normalize_and_core_registries_resolve(self):
+        register_builtins()
+        defaults_path = os.path.join("training_base", "configs", "defaults.yaml")
+        for filename in os.listdir(os.path.join("training_base", "configs")):
+            if not filename.endswith(".yaml"):
+                continue
+            config = load_yaml(defaults_path)
+            user_config = load_yaml(os.path.join("training_base", "configs", filename))
+            from training_base.core.config import deep_merge
+
+            normalized = normalize_config(deep_merge(config, user_config))
+            self.assertIn(normalized["algorithm"]["name"], algorithm_registry.names())
+            self.assertIn(normalized["model"]["name"], model_registry.names())
+            self.assertIn(normalized["objective"]["name"], objective_registry.names())
+            self.assertIn(normalized["data"]["module_name"], data_module_registry.names())
+
+    def test_legacy_negative_mining_alias_can_disable_goal_sampling(self):
+        config = self._default_config()
+        config["data"].pop("goal_sampling", None)
+        config["data"]["datasets"] = {"tiny": {"negative_mining": False}}
+        normalized = normalize_config(config)
+        self.assertFalse(normalized["data"]["goal_sampling"]["negative"]["enabled"])
 
 
 class DataSubsetTest(unittest.TestCase):
@@ -248,6 +341,35 @@ class DataSubsetTest(unittest.TestCase):
         self.assertEqual(sample_for(3, 7), sample_for(3, 7))
         self.assertNotEqual(sample_for(3, 7), sample_for(4, 7))
         self.assertEqual(len(list(iter(sampler))), 3)
+
+    def test_goal_sampling_new_config_preserves_legacy_default_and_can_disable_negative(self):
+        goals_index = [("other", 5)]
+
+        class ZeroRng:
+            def integers(self, low, high):
+                return 0
+
+        legacy = sample_goal("traj", 10, 5, 2, goals_index, rng=ZeroRng())
+        configured = sample_navigation_goal(
+            "traj",
+            10,
+            5,
+            2,
+            goals_index,
+            config=normalize_goal_sampling_config({"negative": {"enabled": True}}),
+            rng=ZeroRng(),
+        )
+        disabled = sample_navigation_goal(
+            "traj",
+            10,
+            5,
+            2,
+            goals_index,
+            config=normalize_goal_sampling_config({"negative": {"enabled": False}}),
+            rng=ZeroRng(),
+        )
+        self.assertEqual(legacy, configured)
+        self.assertEqual(disabled, ("traj", 12, False))
 
     def test_epoch_aware_dataloader_is_deterministic_with_persistent_workers(self):
         def collect(seed, epoch):
@@ -481,6 +603,49 @@ class WandBSinkTest(unittest.TestCase):
         context = mock.Mock(is_main_process=True)
         sink = WandBSink({"enabled": False}, context)
         self.assertIsNone(sink.run)
+
+
+class MetricReduceTest(unittest.TestCase):
+    def test_reduce_metric_logs_no_distributed_returns_clean_floats(self):
+        logs = {
+            "loss": torch.tensor(2.0),
+            "none": None,
+            "nan": float("nan"),
+        }
+        self.assertEqual(reduce_metric_logs_distributed(logs, torch.device("cpu")), {"loss": 2.0})
+
+    def test_reduce_metric_logs_uses_all_reduce_payload(self):
+        captured = []
+
+        def fake_all_reduce(payload, op=None):
+            captured.append((payload.clone(), op))
+            payload[0] += 4.0
+            payload[1] += 1.0
+
+        with mock.patch("training_base.loggers.metric_store.dist.is_available", return_value=True), \
+             mock.patch("training_base.loggers.metric_store.dist.is_initialized", return_value=True), \
+             mock.patch("training_base.loggers.metric_store.dist.all_reduce", side_effect=fake_all_reduce):
+            reduced = reduce_metric_logs_distributed({"loss": 2.0}, torch.device("cpu"))
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(reduced["loss"], 3.0)
+
+    def test_reduce_metric_logs_keeps_collective_keys_for_nan_values(self):
+        calls = []
+
+        def fake_all_reduce(payload, op=None):
+            calls.append(payload.clone())
+            payload[0] += 4.0
+            payload[1] += 1.0
+
+        with mock.patch("training_base.loggers.metric_store.dist.is_available", return_value=True), \
+             mock.patch("training_base.loggers.metric_store.dist.is_initialized", return_value=True), \
+             mock.patch("training_base.loggers.metric_store.dist.all_reduce", side_effect=fake_all_reduce):
+            reduced = reduce_metric_logs_distributed({"loss": 2.0, "nan": float("nan")}, torch.device("cpu"))
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(reduced["loss"], 3.0)
+        self.assertEqual(reduced["nan"], 4.0)
 
     def test_non_strict_wandb_import_failure_does_not_raise(self):
         real_import = builtins.__import__

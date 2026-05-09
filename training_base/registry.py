@@ -18,6 +18,8 @@ metric_registry = Registry("metric")
 visualizer_registry = Registry("visualizer")
 callback_registry = Registry("callback")
 log_sink_registry = Registry("log_sink")
+dataset_registry = Registry("dataset")
+data_module_registry = Registry("data_module")
 module_registry = Registry("module")
 loss_registry = Registry("loss")
 optimizer_registry = Registry("optimizer")
@@ -30,6 +32,7 @@ def register_builtins() -> None:
     # noqa: F401 表示这些导入只为了触发副作用注册，而不是直接使用模块名
     from training_base import algorithms  # noqa: F401
     from training_base import callbacks  # noqa: F401
+    from training_base import data  # noqa: F401
     from training_base import loggers  # noqa: F401
     from training_base import losses  # noqa: F401
     from training_base import metrics  # noqa: F401

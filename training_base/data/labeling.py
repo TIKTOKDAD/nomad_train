@@ -51,12 +51,26 @@ def sample_negative(goals_index, rng=None):
     return goals_index[_randint(rng, len(goals_index))]
 
 
-def sample_goal(trajectory_name, curr_time, max_goal_dist, waypoint_spacing, goals_index, rng=None):
+def sample_goal(
+    trajectory_name,
+    curr_time,
+    max_goal_dist,
+    waypoint_spacing,
+    goals_index,
+    rng=None,
+    *,
+    negative_enabled: bool = True,
+    negative_policy: str = "offset_zero",
+):
     rng = rng or _context_rng()
+    if str(negative_policy).lower() != "offset_zero":
+        raise ValueError(f"negative_policy 当前只支持 offset_zero，实际为 {negative_policy!r}")
     goal_offset = _randint(rng, max_goal_dist + 1)
-    if goal_offset == 0:
+    if goal_offset == 0 and negative_enabled:
         neg_trajectory_name, goal_time = sample_negative(goals_index, rng=rng)
         return neg_trajectory_name, goal_time, True
+    if goal_offset == 0:
+        goal_offset = 1 if max_goal_dist > 0 else 0
     goal_time = curr_time + int(goal_offset * waypoint_spacing)
     return trajectory_name, goal_time, False
 

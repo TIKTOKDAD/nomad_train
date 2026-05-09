@@ -32,17 +32,43 @@ torchrun --standalone --nproc_per_node=4 -m training_base.cli -c training_base/c
 
 ## Resume
 
-Set `runtime.load_run` to a run under `logs/`:
+Set `runtime.load_run` to a run under `runtime.log_root`:
 
 ```yaml
 runtime:
+  log_root: logs
   load_run: navigation/nomad_2026_05_09_120000
   epochs: 100
+```
+
+Or resume from an explicit file:
+
+```yaml
+runtime:
+  load_checkpoint_path: logs/navigation/nomad_2026_05_09_120000/latest.pth
+  resume_strict: true
 ```
 
 `runtime.epochs` is the target total epoch count, not the number of extra epochs to append. A checkpoint saved at epoch 20 resumes from epoch 21 and runs until epoch 99 when `epochs: 100`.
 
 The framework supports epoch-level recovery. It saves model, optimizer, scheduler, algorithm state, callback state, global step, and RNG state. It does not guarantee mid-epoch replay.
+
+Legacy GNM/ViNT/NoMaD weight layouts are not remapped silently. Use `runtime.allow_legacy_weight_remap: true` only when intentionally migrating old checkpoints.
+
+## Data Sampling
+
+Negative goal sampling is configured centrally:
+
+```yaml
+data:
+  goal_sampling:
+    negative:
+      enabled: true
+      policy: offset_zero
+      distance_label: max_dist_cat
+```
+
+Dataset-level `negative_mining` remains accepted for old configs. New non-standard data flows should register a data module and select it with `data.module_name`.
 
 ## Reproducibility
 

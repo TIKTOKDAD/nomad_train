@@ -73,7 +73,7 @@ objective:
   name: supervised_waypoint
 ```
 
-CLI 会先调用 `register_builtins()`，它会导入 `training_base.algorithms`、`training_base.models`、`training_base.modules` 等包，从而触发装饰器注册。
+CLI 会先调用 `register_builtins()`，它会导入 `training_base.algorithms`、`training_base.models`、`training_base.modules`、`training_base.data` 等包，从而触发装饰器注册。
 
 因此你新增文件后，必须保证它被对应包的 `__init__.py` 导入。只写了新文件但没有导入，registry 就找不到它。
 
@@ -158,7 +158,7 @@ metric_scale
 extras
 ```
 
-大多数视觉导航论文都应该先尝试复用这个 batch 协议。只有当新论文真的需要额外标签，例如拓扑节点、语言指令、地图 patch 等，才扩展 `NavigationDataset` 和 `NavigationBatch`。
+大多数视觉导航论文都应该先尝试复用这个 batch 协议。只有当新论文真的需要额外标签，例如拓扑节点、语言指令、地图 patch 等，才扩展 `NavigationBatch`。如果是数据来源或采样流程不同，优先新增 data-module 并注册到 `data_module_registry`，不要继续给 `NavigationDataset` 加模式分支。
 
 ## 3. 标准新增流程
 
@@ -558,6 +558,7 @@ runtime:
   amp_dtype: fp16
 
 data:
+  module_name: navigation
   normalize: true
   # 新数据集元信息默认从 training_base/data/data_config.yaml 读取；
   # 如果新论文有独立数据配置，改成对应 YAML 路径。
@@ -565,6 +566,12 @@ data:
   context_type: temporal
   context_size: 5
   image_size: [85, 64]
+  image_aspect_ratio: 1.3333333333333333
+  goal_sampling:
+    negative:
+      enabled: true
+      policy: offset_zero
+      distance_label: max_dist_cat
   goal_type: image
   len_traj_pred: 5
   learn_angle: true
@@ -697,6 +704,8 @@ callbacks:
 ### 新数据集元信息和 action stats
 
 `data.datasets.<name>` 只描述数据路径和采样策略。数据集的 `metric_waypoint_spacing`、`camera_metrics` 以及 NoMaD 使用的 `action_stats` 默认放在 `training_base/data/data_config.yaml`。如果你不想改默认文件，可以新增一个 YAML，并在实验配置中写：
+
+`negative_mining` 是旧配置兼容字段；新的负样本语义放在 `data.goal_sampling.negative`。默认策略仍是 `offset_zero`：随机 offset 为 0 时采样跨轨迹目标，负样本距离标签默认写成 `max_dist_cat`。如果新论文完全不需要负样本，把 `enabled` 设为 `false`。
 
 ```yaml
 data:

@@ -11,6 +11,7 @@ algorithm:
   name: gnm
 
 runtime:
+  log_root: logs
   # 项目名称（日志输出目录的一级路径）
   project_name: navigation
   # 本次运行名称（日志输出目录的二级路径）
@@ -23,6 +24,11 @@ runtime:
   eval_batch_size: 400
   # 目标总 epoch 数；resume 后会继续训练到该总数，而不是额外追加这么多轮
   epochs: 30
+  load_run: null
+  load_checkpoint_path: null
+  resume_strict: true
+  allow_legacy_weight_remap: false
+  validate_dataset_paths: false
   # 需要使用的 GPU ID 列表
   gpu_ids: [0]
   # DataLoader worker 总数（可能按分布式自动折分）
@@ -83,6 +89,7 @@ runtime:
   lmdb_meminit: false
   # LMDB 最大读者数量
   lmdb_max_readers: 512
+  lmdb_map_size: 1099511627776
   # 是否启用 AMP 混合精度
   amp: false
   # AMP 计算精度（fp16/bf16）
@@ -91,6 +98,7 @@ runtime:
   use_grad_scaler: true
 
 data:
+  module_name: navigation
   # 是否对动作进行归一化
   normalize: true
   # 数据集元信息路径；null 表示使用 training_base/data/data_config.yaml
@@ -105,6 +113,12 @@ data:
   goal_type: image
   # 图像尺寸（宽, 高）
   image_size: [85, 64]
+  image_aspect_ratio: 1.3333333333333333
+  goal_sampling:
+    negative:
+      enabled: true
+      policy: offset_zero
+      distance_label: max_dist_cat
   # 预测轨迹长度（航点数量）
   len_traj_pred: 5
   # 是否学习角度（yaw）
@@ -262,6 +276,7 @@ logging:
     - name: console
 
 visualization:
+  image_size: [160, 120]
   # 每次可视化记录的图片数量
   num_images_log: 8
   # 动作采样数量（NoMaD 可用）

@@ -196,6 +196,28 @@ def upgrade_logging_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return upgraded
 
 
+def upgrade_goal_sampling_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    upgraded = deepcopy(config)
+    data = upgraded.get("data")
+    if not isinstance(data, dict):
+        return upgraded
+    goal_sampling = data.setdefault("goal_sampling", {})
+    negative = goal_sampling.setdefault("negative", {})
+    if "enabled" not in negative:
+        legacy_values = [
+            bool(dataset_config["negative_mining"])
+            for dataset_config in data.get("datasets", {}).values()
+            if isinstance(dataset_config, dict) and "negative_mining" in dataset_config
+        ]
+        negative["enabled"] = all(legacy_values) if legacy_values else True
+    negative.setdefault("policy", "offset_zero")
+    negative.setdefault("distance_label", "max_dist_cat")
+    for dataset_config in data.get("datasets", {}).values():
+        if isinstance(dataset_config, dict) and "negative_mining" in dataset_config:
+            dataset_config.setdefault("negative_mining", dataset_config["negative_mining"])
+    return upgraded
+
+
 # 读取 YAML 配置文件，空文件返回空字典
 def load_yaml(path: str) -> Dict[str, Any]:
     # 所有配置文件都按 UTF-8 读取，保证中文注释不会影响解析
@@ -262,10 +284,53 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("runtime.amp_dtype 必须是 fp16 或 bf16")
     if str(runtime.get("lmdb_cache_mode", "auto")).lower() not in {"auto", "read", "build"}:
         raise ValueError("runtime.lmdb_cache_mode 必须是 auto、read 或 build 之一")
+    _validate_positive_int(runtime.get("lmdb_map_size", 2 ** 40), "runtime.lmdb_map_size")
 
     context_type = str(data.get("context_type", "temporal")).lower()
     if context_type != "temporal":
         raise ValueError("data.context_type 当前只支持 temporal")
+    data["module_name"] = str(data.get("module_name", "navigation")).lower()
+    image_size = data.get("image_size")
+    if not isinstance(image_size, (list, tuple)) or len(image_size) != 2:
+        raise ValueError("data.image_size 必须是 [width, height]")
+    _validate_positive_int(image_size[0], "data.image_size[0]")
+    _validate_positive_int(image_size[1], "data.image_size[1]")
+    if float(data.get("image_aspect_ratio", 4 / 3)) <= 0:
+        raise ValueError("data.image_aspect_ratio 必须大于 0")
+    distance = data.get("distance", {})
+    action = data.get("action", {})
+    if int(distance.get("min_dist_cat", 0)) > int(distance.get("max_dist_cat", 0)):
+        raise ValueError("data.distance.min_dist_cat 不能大于 max_dist_cat")
+    if int(action.get("min_dist_cat", 0)) > int(action.get("max_dist_cat", 0)):
+        raise ValueError("data.action.min_dist_cat 不能大于 max_dist_cat")
+    goal_negative = data.get("goal_sampling", {}).get("negative", {})
+    if str(goal_negative.get("policy", "offset_zero")).lower() not in {"offset_zero"}:
+        raise ValueError("data.goal_sampling.negative.policy 当前只支持 offset_zero")
+    if str(goal_negative.get("distance_label", "max_dist_cat")).lower() not in {"max_dist_cat", "minus_one"}:
+        raise ValueError("data.goal_sampling.negative.distance_label 必须是 max_dist_cat 或 minus_one")
+    viz_size = config["visualization"].get("image_size", [160, 120])
+    if not isinstance(viz_size, (list, tuple)) or len(viz_size) != 2:
+        raise ValueError("visualization.image_size 必须是 [width, height]")
+    _validate_positive_int(viz_size[0], "visualization.image_size[0]")
+    _validate_positive_int(viz_size[1], "visualization.image_size[1]")
+    if not config["optimizer"].get("name"):
+        raise KeyError("必须配置 optimizer.name")
+    if "lr" not in config["optimizer"]:
+        raise KeyError("必须配置 optimizer.lr")
+    if config.get("scheduler") and "name" not in config["scheduler"]:
+        raise KeyError("必须配置 scheduler.name")
+    if bool(runtime.get("validate_dataset_paths", False)):
+        for dataset_name, dataset_config in data.get("datasets", {}).items():
+            for field in ("data_folder", "train", "test"):
+                if field in dataset_config and not os.path.exists(dataset_config[field]):
+                    raise FileNotFoundError(f"data.datasets.{dataset_name}.{field} 不存在: {dataset_config[field]}")
+    for sink in logging_config.get("sinks", []):
+        if not isinstance(sink, dict) or not sink.get("name"):
+            raise KeyError("logging.sinks 每项都必须配置 name")
+        if str(sink.get("name")).lower() == "wandb" and bool(sink.get("enabled", True)):
+            project = sink.get("project", config["runtime"].get("project_name"))
+            if not project:
+                raise KeyError("启用 W&B sink 时必须配置 project 或 runtime.project_name")
 
     eval_fraction_value = _nested_get(logging_config, ("eval", "schedule", "fraction"))
     eval_fraction = float(1.0 if eval_fraction_value is None else eval_fraction_value)
@@ -276,13 +341,20 @@ def validate_config(config: Dict[str, Any]) -> None:
 
 # 规范化配置：关键名称统一小写，并执行校验
 def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    config = deepcopy(config)
+    config = upgrade_goal_sampling_config(deepcopy(config))
     # registry key 大小写统一，避免 YAML 中写 GNM/gnm 导致查找不一致
     config["algorithm"]["name"] = str(config["algorithm"]["name"]).lower()
     config["model"]["name"] = str(config["model"]["name"]).lower()
     config["objective"]["name"] = str(config["objective"]["name"]).lower()
     config["optimizer"]["name"] = str(config["optimizer"]["name"]).lower()
     config["data"]["context_type"] = str(config["data"].get("context_type", "temporal")).lower()
+    config["data"]["module_name"] = str(config["data"].get("module_name", "navigation")).lower()
+    config["data"]["goal_sampling"]["negative"]["policy"] = str(
+        config["data"]["goal_sampling"]["negative"].get("policy", "offset_zero")
+    ).lower()
+    config["data"]["goal_sampling"]["negative"]["distance_label"] = str(
+        config["data"]["goal_sampling"]["negative"].get("distance_label", "max_dist_cat")
+    ).lower()
     config["runtime"]["amp_dtype"] = str(config["runtime"].get("amp_dtype", "fp16")).lower()
     config["runtime"]["lmdb_cache_mode"] = str(config["runtime"].get("lmdb_cache_mode", "auto")).lower()
     if config.get("scheduler") and config["scheduler"].get("name") is not None:
@@ -293,8 +365,8 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
 # 加载默认配置与用户配置并合并
 def load_config(default_path: str, user_path: str) -> Dict[str, Any]:
-    default_config = upgrade_logging_config(load_yaml(default_path))
-    user_config = upgrade_logging_config(load_yaml(user_path))
+    default_config = upgrade_goal_sampling_config(upgrade_logging_config(load_yaml(default_path)))
+    user_config = upgrade_goal_sampling_config(upgrade_logging_config(load_yaml(user_path)))
     config = deep_merge(default_config, user_config)
     # 记录用户配置路径，日志 sink 可上传/保存该文件以便复现实验
     config["config_path"] = user_path

@@ -114,6 +114,7 @@ def build_or_open_lmdb_cache(
     lmdb_readahead: bool,
     lmdb_meminit: bool,
     lmdb_max_readers: int,
+    lmdb_map_size: int,
     lmdb_cache_mode: str,
     rebuild_incomplete_lmdb: bool,
     use_tqdm: bool = True,
@@ -168,7 +169,7 @@ def build_or_open_lmdb_cache(
             desc=f"正在为 {dataset_name} 构建 LMDB 缓存",
         )
         num_cached_images = 0
-        with lmdb.open(tmp_cache_filename, map_size=2 ** 40) as image_cache:
+        with lmdb.open(tmp_cache_filename, map_size=int(lmdb_map_size)) as image_cache:
             with image_cache.begin(write=True) as txn:
                 for traj_name, time in tqdm_iterator:
                     image_path = get_data_path(data_folder, traj_name, time)

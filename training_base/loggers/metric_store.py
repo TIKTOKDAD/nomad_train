@@ -22,6 +22,26 @@ def _to_float(value) -> float:
     return float(value)
 
 
+def reduce_metric_logs_distributed(logs: Dict[str, object], device) -> Dict[str, float]:
+    reduced = {}
+    local = {}
+    for key, value in logs.items():
+        if value is None:
+            local[key] = None
+            continue
+        number = _to_float(value)
+        local[key] = number if not np.isnan(number) else None
+    if not (dist.is_available() and dist.is_initialized()):
+        return {key: value for key, value in local.items() if value is not None}
+    for key in sorted(local):
+        value = local[key]
+        payload = torch.tensor([0.0 if value is None else value, 0.0 if value is None else 1.0], device=device, dtype=torch.float64)
+        dist.all_reduce(payload, op=dist.ReduceOp.SUM)
+        if payload[1].item() > 0:
+            reduced[key] = (payload[0] / payload[1]).item()
+    return reduced
+
+
 # 指标缓存：支持滑动窗口统计与分布式聚合
 class MetricStore:
     # window_size 控制 display_latest 的移动平均窗口
