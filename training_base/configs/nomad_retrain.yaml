@@ -414,7 +414,7 @@ logging:
       freq: 100
       unit: step
       # behavior 指标会执行 diffusion sampling，训练早期默认跳过
-      start_step: 1000
+      start_step: 100
     optim:
       # train/optim/lr、grad_norm、AMP grad_scale 的记录频率（步）
       freq: 100
@@ -438,9 +438,9 @@ logging:
   # media 板块：训练图片和 eval 图片独立控制
   media:
     train:
-      freq: 500
+      freq: 100
       unit: step
-      start_step: 500
+      start_step: 100
     eval:
       trigger: eval
       freq: 1
